@@ -59,6 +59,10 @@
     }
   },
   "firestore": {
+    "/workspaces/{pinId}": {
+      "schema": "DatabaseDump",
+      "description": "PIN-based cloud workspace document synced across devices using a 4-digit code"
+    },
     "/users/{userId}/workspace/{docId}": {
       "schema": "UserWorkspace",
       "description": "Per-user private workspace document holding routines, habits, projects, learning, and reminders"

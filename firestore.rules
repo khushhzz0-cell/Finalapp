@@ -1,29 +1,8 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Health check doc for connection testing
-    match /workspaces/health_check {
-      allow read: if true;
-    }
-
-    // User private workspace data (Strictly isolated to owner)
-    match /users/{userId}/workspace/{docId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
-    }
-
-    // User root tree
-    match /users/{userId}/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
-    }
-
-    // Shared / fallback workspace document
-    match /workspaces/{docId} {
-      allow read, write: if true;
-    }
-
-    // Default catch-all
     match /{document=**} {
-      allow read, write: if false;
+      allow read, write: if true;
     }
   }
 }

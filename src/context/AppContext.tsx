@@ -20,19 +20,10 @@ import {
 import { DEFAULT_SETTINGS, storage } from '../db/storage';
 import { downloadExcelArchive } from '../utils/excelExport';
 import {
-  AuthUser,
-  signInWithGoogle,
-  signOutUser,
-  subscribeToAuth,
-} from '../services/firebaseAuth';
-import {
   testFirestoreConnection,
-  loadWorkspaceFromFirestore,
-  saveWorkspaceToFirestore,
-  subscribeToFirestoreWorkspace,
-  loadUserWorkspace,
-  saveUserWorkspace,
-  subscribeToUserWorkspace,
+  loadPinWorkspace,
+  savePinWorkspace,
+  subscribeToPinWorkspace,
   subscribeSyncStatus,
   SyncStatus,
 } from '../services/firestoreSync';
@@ -46,11 +37,9 @@ interface AppContextType {
   // Cloud Database Persistence & Status
   syncStatus: SyncStatus;
 
-  // Google Account & Cloud Backup
-  user: AuthUser | null;
-  isAuthLoading: boolean;
-  signIn: () => Promise<void>;
-  signOut: () => Promise<void>;
+  // 4-Digit Unique User Code & Cloud Sync
+  syncPin: string;
+  setSyncPin: (newPin: string) => Promise<void>;
   syncNow: () => Promise<void>;
   lastSyncedTime: string | null;
 
@@ -266,22 +255,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([]);
   const [isReady, setIsReady] = useState(false);
 
-  // Google Account & Cloud Backup State
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
+  // 4-Digit Unique User Code & Cloud Sync State
+  const [syncPin, setSyncPinState] = useState<string>(() => {
+    try {
+      return localStorage.getItem('focusdo_sync_pin') || '1234';
+    } catch {
+      return '1234';
+    }
+  });
   const [lastSyncedTime, setLastSyncedTime] = useState<string | null>(null);
 
-  // Keep a ref to the current user so save operations always have the latest auth state
-  const userRef = React.useRef<AuthUser | null>(null);
-  userRef.current = user;
+  // Ref to ensure save/persist always targets the currently active PIN
+  const syncPinRef = React.useRef<string>(syncPin);
+  syncPinRef.current = syncPin;
+  const unsubPinSnapshotRef = React.useRef<(() => void) | null>(null);
 
-  // Initialize DB on boot & Sync with Cloud Firestore
+  // Initialize DB on boot & Sync with Cloud Firestore using the 4-digit code
   useEffect(() => {
-    let unsubSnapshot: (() => void) | null = null;
     const unsubStatus = subscribeSyncStatus(setSyncStatus);
+    const initialPin = syncPinRef.current;
 
     async function initialBoot() {
-      // 1. Instant local load (0ms UI latency)
+      // 1. Instant local load
       const dump = await storage.init();
       setRoutines(dump.routines || []);
       setHabits(dump.habits || []);
@@ -301,112 +296,61 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       // 2. Test Firestore connection
       testFirestoreConnection().catch(() => {});
+
+      // 3. Connect to cloud workspace for this PIN
+      try {
+        const remoteDump = await loadPinWorkspace(initialPin);
+        if (remoteDump) {
+          if (remoteDump.routines) setRoutines(remoteDump.routines);
+          if (remoteDump.habits) setHabits(remoteDump.habits);
+          if (remoteDump.projects) setProjects(remoteDump.projects);
+          if (remoteDump.learning) setLearning(remoteDump.learning);
+          if (remoteDump.phases) setPhases(remoteDump.phases);
+          if (remoteDump.seasons) setSeasons(remoteDump.seasons);
+          if (remoteDump.rough) setRough(remoteDump.rough);
+          if (remoteDump.reminders) setReminders(remoteDump.reminders);
+          if (remoteDump.settings) setSettings(remoteDump.settings);
+          if (remoteDump.activityLog) setActivityLog(remoteDump.activityLog);
+          storage.save(remoteDump);
+        } else {
+          // If remote doesn't exist yet, save current local state to this PIN
+          await savePinWorkspace(initialPin, dump);
+        }
+        setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+      } catch (err) {
+        console.warn('Initial PIN cloud sync error:', err);
+      }
+
+      // 4. Real-time Firestore sync across tabs, browsers, and devices for this PIN
+      unsubPinSnapshotRef.current = subscribeToPinWorkspace(initialPin, (remoteDump) => {
+        if (remoteDump && syncPinRef.current === initialPin) {
+          if (remoteDump.routines) setRoutines(remoteDump.routines);
+          if (remoteDump.habits) setHabits(remoteDump.habits);
+          if (remoteDump.projects) setProjects(remoteDump.projects);
+          if (remoteDump.learning) setLearning(remoteDump.learning);
+          if (remoteDump.phases) setPhases(remoteDump.phases);
+          if (remoteDump.seasons) setSeasons(remoteDump.seasons);
+          if (remoteDump.rough) setRough(remoteDump.rough);
+          if (remoteDump.reminders) setReminders(remoteDump.reminders);
+          if (remoteDump.settings) setSettings(remoteDump.settings);
+          if (remoteDump.activityLog) setActivityLog(remoteDump.activityLog);
+          storage.save(remoteDump);
+          setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+        }
+      });
     }
 
     initialBoot();
 
-    // 3. Listen to Firebase Authentication state (Google Sign-In)
-    const unsubAuth = subscribeToAuth(async (authUser) => {
-      setUser(authUser);
-      setIsAuthLoading(false);
-
-      if (unsubSnapshot) {
-        unsubSnapshot();
-        unsubSnapshot = null;
-      }
-
-      if (authUser) {
-        // User is authenticated! Load authoritative cloud workspace for this user
-        try {
-          const userCloudDump = await loadUserWorkspace(authUser.uid);
-          if (userCloudDump) {
-            // Restore user's remote cloud data into local state
-            if (userCloudDump.routines) setRoutines(userCloudDump.routines);
-            if (userCloudDump.habits) setHabits(userCloudDump.habits);
-            if (userCloudDump.projects) setProjects(userCloudDump.projects);
-            if (userCloudDump.learning) setLearning(userCloudDump.learning);
-            if (userCloudDump.phases) setPhases(userCloudDump.phases);
-            if (userCloudDump.seasons) setSeasons(userCloudDump.seasons);
-            if (userCloudDump.rough) setRough(userCloudDump.rough);
-            if (userCloudDump.reminders) setReminders(userCloudDump.reminders);
-            if (userCloudDump.settings) setSettings(userCloudDump.settings);
-            if (userCloudDump.activityLog) setActivityLog(userCloudDump.activityLog);
-            storage.save(userCloudDump);
-            setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-          } else {
-            // First time logging in with this account: back up current local workspace into the cloud
-            const currentLocalDump = await storage.init();
-            await saveUserWorkspace(authUser.uid, currentLocalDump);
-            setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-          }
-
-          // Subscribe to real-time updates for this user across tabs/devices
-          unsubSnapshot = subscribeToUserWorkspace(authUser.uid, (remoteDump) => {
-            if (remoteDump) {
-              if (remoteDump.routines) setRoutines(remoteDump.routines);
-              if (remoteDump.habits) setHabits(remoteDump.habits);
-              if (remoteDump.projects) setProjects(remoteDump.projects);
-              if (remoteDump.learning) setLearning(remoteDump.learning);
-              if (remoteDump.phases) setPhases(remoteDump.phases);
-              if (remoteDump.seasons) setSeasons(remoteDump.seasons);
-              if (remoteDump.rough) setRough(remoteDump.rough);
-              if (remoteDump.reminders) setReminders(remoteDump.reminders);
-              if (remoteDump.settings) setSettings(remoteDump.settings);
-              if (remoteDump.activityLog) setActivityLog(remoteDump.activityLog);
-              storage.save(remoteDump);
-              setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-            }
-          });
-        } catch (err) {
-          console.warn('Error loading user cloud workspace:', err);
-        }
-      } else {
-        // Fallback unauthenticated workspace subscription (for guests)
-        try {
-          const cloudDump = await loadWorkspaceFromFirestore();
-          if (cloudDump) {
-            if (cloudDump.routines) setRoutines(cloudDump.routines);
-            if (cloudDump.habits) setHabits(cloudDump.habits);
-            if (cloudDump.projects) setProjects(cloudDump.projects);
-            if (cloudDump.learning) setLearning(cloudDump.learning);
-            if (cloudDump.phases) setPhases(cloudDump.phases);
-            if (cloudDump.seasons) setSeasons(cloudDump.seasons);
-            if (cloudDump.rough) setRough(cloudDump.rough);
-            if (cloudDump.reminders) setReminders(cloudDump.reminders);
-            if (cloudDump.settings) setSettings(cloudDump.settings);
-            if (cloudDump.activityLog) setActivityLog(cloudDump.activityLog);
-            storage.save(cloudDump);
-          }
-        } catch (e) {
-          console.warn('Fallback sync note:', e);
-        }
-
-        unsubSnapshot = subscribeToFirestoreWorkspace((remoteDump) => {
-          if (remoteDump && !userRef.current) {
-            if (remoteDump.routines) setRoutines(remoteDump.routines);
-            if (remoteDump.habits) setHabits(remoteDump.habits);
-            if (remoteDump.projects) setProjects(remoteDump.projects);
-            if (remoteDump.learning) setLearning(remoteDump.learning);
-            if (remoteDump.phases) setPhases(remoteDump.phases);
-            if (remoteDump.seasons) setSeasons(remoteDump.seasons);
-            if (remoteDump.rough) setRough(remoteDump.rough);
-            if (remoteDump.reminders) setReminders(remoteDump.reminders);
-            if (remoteDump.settings) setSettings(remoteDump.settings);
-            if (remoteDump.activityLog) setActivityLog(remoteDump.activityLog);
-            storage.save(remoteDump);
-          }
-        });
-      }
-    });
-
     return () => {
       unsubStatus();
-      unsubAuth();
-      if (unsubSnapshot) unsubSnapshot();
+      if (unsubPinSnapshotRef.current) {
+        unsubPinSnapshotRef.current();
+      }
     };
   }, []);
 
-  // Save changes to persistent storage AND cloud database (Firestore)
+  // Save changes to persistent storage AND cloud database (Firestore) for current PIN
   const persist = (
     nextRoutines = routines,
     nextHabits = habits,
@@ -420,9 +364,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     nextActivityLog = activityLog
   ) => {
     if (!isReady) return;
+    const currentPin = syncPinRef.current;
     const dump: DatabaseDump = {
       version: 1,
       exportedAt: new Date().toISOString(),
+      ownerPin: currentPin,
       routines: nextRoutines,
       habits: nextHabits,
       projects: nextProjects,
@@ -438,51 +384,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // Save locally for instant offline performance
     storage.save(dump);
 
-    // Save directly to Firestore under authenticated user account or fallback
-    const currentUser = userRef.current;
-    if (currentUser) {
-      saveUserWorkspace(currentUser.uid, dump)
-        .then(() => {
-          setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-        })
-        .catch((err) => {
-          console.warn('Failed to sync change to user cloud account:', err);
-        });
-    } else {
-      saveWorkspaceToFirestore(dump).catch((err) => {
-        console.warn('Failed to sync change to cloud database:', err);
+    // Save directly to Firestore for this specific 4-digit PIN!
+    savePinWorkspace(currentPin, dump)
+      .then(() => {
+        setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+      })
+      .catch((err) => {
+        console.warn('Failed to sync to cloud PIN workspace:', err);
       });
-    }
-  };
-
-  const signIn = async () => {
-    try {
-      const authed = await signInWithGoogle();
-      if (authed) {
-        triggerHaptic('success');
-      }
-    } catch (err: any) {
-      console.error('Sign-in failed:', err);
-      triggerHaptic('warning');
-    }
-  };
-
-  const signOut = async () => {
-    try {
-      await signOutUser();
-      setUser(null);
-      triggerHaptic('light');
-    } catch (err) {
-      console.error('Sign-out failed:', err);
-    }
   };
 
   const syncNow = async () => {
     triggerHaptic('selection');
     setSyncStatus('syncing');
+    const currentPin = syncPinRef.current;
     const dump: DatabaseDump = {
       version: 1,
       exportedAt: new Date().toISOString(),
+      ownerPin: currentPin,
       routines,
       habits,
       projects,
@@ -496,16 +415,107 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
 
     try {
-      const currentUser = userRef.current;
-      if (currentUser) {
-        await saveUserWorkspace(currentUser.uid, dump);
-      } else {
-        await saveWorkspaceToFirestore(dump);
-      }
+      await savePinWorkspace(currentPin, dump);
       setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
       setSyncStatus('synced');
       triggerHaptic('success');
     } catch (e) {
+      setSyncStatus('error');
+      triggerHaptic('warning');
+    }
+  };
+
+  const setSyncPin = async (rawPin: string) => {
+    const cleanPin = rawPin.replace(/\D/g, '').slice(0, 4);
+    if (!cleanPin || cleanPin.length !== 4) return;
+    if (cleanPin === syncPinRef.current) {
+      await syncNow();
+      return;
+    }
+
+    triggerHaptic('selection');
+    setSyncStatus('syncing');
+    setSyncPinState(cleanPin);
+    syncPinRef.current = cleanPin;
+    try {
+      localStorage.setItem('focusdo_sync_pin', cleanPin);
+    } catch {}
+
+    // Unsubscribe from previous PIN listener
+    if (unsubPinSnapshotRef.current) {
+      unsubPinSnapshotRef.current();
+      unsubPinSnapshotRef.current = null;
+    }
+
+    try {
+      const remoteDump = await loadPinWorkspace(cleanPin);
+      if (remoteDump) {
+        // Load existing PIN data - cleanly isolate to this PIN!
+        setRoutines(remoteDump.routines || []);
+        setHabits(remoteDump.habits || []);
+        setProjects(remoteDump.projects || []);
+        setLearning(remoteDump.learning || []);
+        setPhases(remoteDump.phases || []);
+        setSeasons(remoteDump.seasons || []);
+        setRough(remoteDump.rough || []);
+        setReminders(remoteDump.reminders || []);
+        setSettings(remoteDump.settings || DEFAULT_SETTINGS);
+        setActivityLog(remoteDump.activityLog || []);
+        storage.save(remoteDump);
+      } else {
+        // Brand new PIN: start completely clean so data is NOT mixed!
+        const freshDump: DatabaseDump = {
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          ownerPin: cleanPin,
+          routines: [],
+          habits: [],
+          projects: [],
+          learning: [],
+          phases: [],
+          seasons: [],
+          rough: [],
+          reminders: [],
+          settings: DEFAULT_SETTINGS,
+          activityLog: [],
+        };
+        setRoutines([]);
+        setHabits([]);
+        setProjects([]);
+        setLearning([]);
+        setPhases([]);
+        setSeasons([]);
+        setRough([]);
+        setReminders([]);
+        setSettings(DEFAULT_SETTINGS);
+        setActivityLog([]);
+        storage.save(freshDump);
+        await savePinWorkspace(cleanPin, freshDump);
+      }
+
+      setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+      setSyncStatus('synced');
+      triggerHaptic('success');
+
+      // Attach real-time snapshot listener for this new PIN
+      unsubPinSnapshotRef.current = subscribeToPinWorkspace(cleanPin, (updated) => {
+        if (updated && syncPinRef.current === cleanPin) {
+          if (updated.routines) setRoutines(updated.routines);
+          if (updated.habits) setHabits(updated.habits);
+          if (updated.projects) setProjects(updated.projects);
+          if (updated.learning) setLearning(updated.learning);
+          if (updated.phases) setPhases(updated.phases);
+          if (updated.seasons) setSeasons(updated.seasons);
+          if (updated.rough) setRough(updated.rough);
+          if (updated.reminders) setReminders(updated.reminders);
+          if (updated.settings) setSettings(updated.settings);
+          if (updated.activityLog) setActivityLog(updated.activityLog);
+          storage.save(updated);
+          setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+        }
+      });
+    } catch (err) {
+      console.error('Failed to switch PIN workspace:', err);
       setSyncStatus('error');
       triggerHaptic('warning');
     }
@@ -1381,10 +1391,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       currentTab,
       setCurrentTab,
       syncStatus,
-      user,
-      isAuthLoading,
-      signIn,
-      signOut,
+      syncPin,
+      setSyncPin,
       syncNow,
       lastSyncedTime,
       isLocked,
@@ -1481,8 +1489,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     [
       currentTab,
       syncStatus,
-      user,
-      isAuthLoading,
+      syncPin,
       lastSyncedTime,
       isLocked,
       settings,

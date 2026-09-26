@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   Download,
@@ -15,10 +15,7 @@ import {
   CheckCircle2,
   Volume2,
   Smartphone,
-  LogIn,
-  LogOut,
-  User as UserIcon,
-  ShieldCheck,
+  KeyRound,
 } from 'lucide-react';
 import { getSavedGoogleSheetInfo } from '../../services/googleSheetsSync';
 import { haptics, triggerHaptic, HapticType } from '../../utils/haptics';
@@ -34,17 +31,21 @@ export const SettingsModal: React.FC = () => {
     resetToDefaults,
     setIsExcelModalOpen,
     exportToExcel,
-    user,
-    isAuthLoading,
-    signIn,
-    signOut,
+    syncPin,
+    setSyncPin,
     syncNow,
     syncStatus,
     lastSyncedTime,
   } = useApp();
 
-  const [newPin, setNewPin] = useState(settings.pin);
-  const [pinSaved, setPinSaved] = useState(false);
+  const [pinInput, setPinInput] = useState(syncPin);
+  const [pinStatusMsg, setPinStatusMsg] = useState<string | null>(null);
+  const [newLockPin, setNewLockPin] = useState(settings.pin);
+  const [lockPinSaved, setLockPinSaved] = useState(false);
+
+  useEffect(() => {
+    setPinInput(syncPin);
+  }, [syncPin]);
   const [importJsonText, setImportJsonText] = useState('');
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -69,12 +70,24 @@ export const SettingsModal: React.FC = () => {
 
   if (!isSettingsOpen) return null;
 
-  const handleSavePin = (e: React.FormEvent) => {
+  const handleSwitchSyncPin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (newPin.length === 4) {
-      updateSettings({ pin: newPin });
-      setPinSaved(true);
-      setTimeout(() => setPinSaved(false), 2000);
+    const clean = pinInput.replace(/\D/g, '').slice(0, 4);
+    if (clean.length !== 4) {
+      setPinStatusMsg('Please enter a 4-digit code');
+      return;
+    }
+    await setSyncPin(clean);
+    setPinStatusMsg(`Switched to Sync Code #${clean}!`);
+    setTimeout(() => setPinStatusMsg(null), 2500);
+  };
+
+  const handleSaveLockPin = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newLockPin.length === 4) {
+      updateSettings({ pin: newLockPin });
+      setLockPinSaved(true);
+      setTimeout(() => setLockPinSaved(false), 2000);
     }
   };
 
@@ -136,141 +149,108 @@ export const SettingsModal: React.FC = () => {
           </button>
         </div>
 
-        {/* 0. GOOGLE ACCOUNT & CLOUD BACKUP (Primary user requirement) */}
+        {/* 0. 4-DIGIT UNIQUE USER SYNC CODE (The primary user sync system) */}
         <div className="space-y-1.5">
           <div className="flex items-center justify-between px-1">
             <span className="text-[11px] text-zinc-500 font-medium uppercase tracking-wider flex items-center gap-1.5">
-              <Cloud className="w-3.5 h-3.5 text-[#0a84ff]" />
-              Account & Cloud Backup
+              <KeyRound className="w-3.5 h-3.5 text-[#0a84ff]" />
+              Unique User Sync Code (4-Digit)
             </span>
-            {user ? (
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 font-medium flex items-center gap-1">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block animate-pulse" />
-                Synced to Account
-              </span>
-            ) : (
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-400 font-medium">
-                Not Logged In
-              </span>
-            )}
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-400 font-medium flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block animate-pulse" />
+              Code #{syncPin}
+            </span>
           </div>
 
           <div className="bg-[#121215] rounded-xl overflow-hidden border border-white/[0.06] divide-y divide-white/[0.04]">
-            {user ? (
-              <div className="p-3.5 space-y-3">
-                {/* User Info Bar */}
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-10 h-10 rounded-full overflow-hidden ring-1 ring-white/20 bg-zinc-800 flex items-center justify-center flex-shrink-0 text-sm font-semibold text-white">
-                      {user.photoURL ? (
-                        <img src={user.photoURL} alt={user.displayName || 'User'} className="w-full h-full object-cover" />
-                      ) : (
-                        <span>{(user.displayName || user.email || 'U')[0].toUpperCase()}</span>
-                      )}
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-xs font-semibold text-zinc-100 truncate block">
-                          {user.displayName || 'FocusDo User'}
-                        </span>
-                        <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
-                      </div>
-                      <span className="text-[11px] text-zinc-400 truncate block font-mono">
-                        {user.email}
-                      </span>
-                    </div>
+            <div className="p-3.5 space-y-3">
+              <form onSubmit={handleSwitchSyncPin} className="space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-zinc-200">
+                    Your 4-Digit Unique User Code:
+                  </span>
+                  <span className="text-[10px] font-mono text-zinc-500">
+                    Active: #{syncPin}
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500 font-mono text-sm">
+                      #
+                    </span>
+                    <input
+                      type="text"
+                      pattern="[0-9]{4}"
+                      maxLength={4}
+                      value={pinInput}
+                      onChange={(e) => setPinInput(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                      placeholder="e.g. 7788"
+                      className="w-full pl-7 pr-3 py-2 rounded-lg bg-black/40 border border-white/[0.08] text-sm text-zinc-100 font-mono font-bold tracking-widest focus:outline-none focus:border-[#0a84ff]"
+                    />
                   </div>
 
                   <button
-                    onClick={() => signOut()}
-                    className="px-2.5 py-1 rounded-lg bg-white/[0.04] hover:bg-rose-500/15 border border-white/[0.06] hover:border-rose-500/30 text-zinc-400 hover:text-rose-400 text-xs font-medium transition cursor-pointer flex items-center gap-1 flex-shrink-0"
-                    title="Sign out of account"
+                    type="submit"
+                    disabled={pinInput.length !== 4 || pinInput === syncPin}
+                    className="px-3.5 py-2 rounded-lg bg-[#0a84ff] hover:bg-[#0071e3] active:scale-95 disabled:opacity-40 disabled:pointer-events-none text-white text-xs font-semibold transition cursor-pointer flex-shrink-0"
                   >
-                    <LogOut className="w-3 h-3" />
-                    <span>Sign Out</span>
+                    Switch Code
                   </button>
                 </div>
 
-                {/* Backup Status Info */}
-                <div className="p-2.5 rounded-lg bg-black/30 border border-white/[0.04] flex items-center justify-between gap-2 text-xs">
-                  <div>
-                    <span className="text-zinc-300 font-medium block">
-                      Automatic Real-time Sync
-                    </span>
-                    <span className="text-[11px] text-zinc-500 block">
-                      {lastSyncedTime
-                        ? `Last synced at ${lastSyncedTime}`
-                        : syncStatus === 'syncing'
-                        ? 'Syncing with cloud...'
-                        : 'Active across all tabs and devices'}
-                    </span>
-                  </div>
+                {pinStatusMsg && (
+                  <p className="text-xs text-emerald-400 font-medium animate-in fade-in">
+                    {pinStatusMsg}
+                  </p>
+                )}
+              </form>
 
+              {/* Explanatory notice */}
+              <div className="p-2.5 rounded-lg bg-black/30 border border-white/[0.04] space-y-1.5 text-xs">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="text-zinc-400">
+                    Sync Status: <span className="text-emerald-400 font-medium">Connected</span>
+                  </span>
+                  <span className="text-zinc-500 font-mono text-[10px]">
+                    {lastSyncedTime ? `Synced at ${lastSyncedTime}` : 'All changes saved to cloud'}
+                  </span>
+                </div>
+
+                <p className="text-[11px] text-zinc-400 leading-relaxed">
+                  Enter this same 4-digit code on any other tab, browser, or device to load your exact workspace. Entering a different 4-digit code will immediately switch to that code&apos;s isolated workspace without mixing data.
+                </p>
+
+                <div className="pt-1 flex items-center justify-end">
                   <button
+                    type="button"
                     onClick={() => syncNow()}
                     disabled={syncStatus === 'syncing'}
-                    className="px-2.5 py-1 rounded-md bg-[#0a84ff]/20 hover:bg-[#0a84ff]/30 text-[#0a84ff] text-[11px] font-medium transition cursor-pointer flex items-center gap-1 disabled:opacity-50"
+                    className="px-2.5 py-1 rounded-md bg-[#0a84ff]/20 hover:bg-[#0a84ff]/30 text-[#0a84ff] text-[11px] font-medium transition cursor-pointer flex items-center gap-1.5"
                   >
                     <RefreshCw className={`w-3 h-3 ${syncStatus === 'syncing' ? 'animate-spin' : ''}`} />
                     <span>Sync Now</span>
                   </button>
                 </div>
               </div>
-            ) : (
-              <div className="p-4 space-y-3">
-                <div className="space-y-1">
-                  <h4 className="text-xs font-semibold text-zinc-100 flex items-center gap-1.5">
-                    <span>Back up your data to Google</span>
-                  </h4>
-                  <p className="text-[11px] text-zinc-400 leading-relaxed">
-                    Opening the app in another tab or device? Sign in with your Google account so your routines, habits, projects, and notes are permanently backed up and synced in real-time.
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => signIn()}
-                  className="w-full py-2.5 px-3 rounded-lg bg-[#0a84ff] hover:bg-[#0071e3] active:scale-[0.99] text-white text-xs font-semibold flex items-center justify-center gap-2 shadow-lg shadow-[#0a84ff]/20 transition cursor-pointer"
-                >
-                  <svg className="w-4 h-4 bg-white rounded-full p-0.5" viewBox="0 0 24 24">
-                    <path
-                      fill="#4285F4"
-                      d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.8-2.4 3.65v3.03h3.88c2.27-2.09 3.66-5.17 3.66-9.12z"
-                    />
-                    <path
-                      fill="#34A853"
-                      d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.03c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.13C3.26 21.36 7.35 24 12 24z"
-                    />
-                    <path
-                      fill="#FBBC05"
-                      d="M5.28 14.29c-.25-.72-.38-1.49-.38-2.29s.13-1.57.38-2.29V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.13z"
-                    />
-                    <path
-                      fill="#EA4335"
-                      d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.35 0 3.26 2.64 1.25 6.58l4.03 3.13c.95-2.83 3.6-4.96 6.72-4.96z"
-                    />
-                  </svg>
-                  <span>Sign in with Google</span>
-                </button>
-              </div>
-            )}
+            </div>
           </div>
         </div>
 
         {/* 1. PASSCODE GROUP */}
         <div className="space-y-1.5">
           <span className="text-[11px] text-zinc-500 font-medium px-1 uppercase tracking-wider">
-            Security & Passcode
+            Security & Passcode Lock
           </span>
           <div className="bg-[#121215] rounded-xl overflow-hidden divide-y divide-white/[0.04] border border-white/[0.06]">
             {/* Toggle Row */}
             <div className="p-3 flex items-center justify-between">
               <div>
                 <span className="text-xs font-medium text-zinc-200 block">
-                  Passcode Lock
+                  Passcode Lockscreen
                 </span>
                 <span className="text-[11px] text-zinc-500">
-                  Require 4-digit code to open
+                  Require 4-digit code to open app UI
                 </span>
               </div>
 
@@ -291,7 +271,7 @@ export const SettingsModal: React.FC = () => {
 
             {/* Change Passcode Row */}
             {settings.isPinEnabled && (
-              <form onSubmit={handleSavePin} className="p-3 flex items-center justify-between gap-3">
+              <form onSubmit={handleSaveLockPin} className="p-3 flex items-center justify-between gap-3">
                 <span className="text-xs text-zinc-300 font-medium">
                   Current PIN:
                 </span>
@@ -300,8 +280,8 @@ export const SettingsModal: React.FC = () => {
                     type="text"
                     pattern="[0-9]{4}"
                     maxLength={4}
-                    value={newPin}
-                    onChange={e => setNewPin(e.target.value.replace(/\D/g, ''))}
+                    value={newLockPin}
+                    onChange={e => setNewLockPin(e.target.value.replace(/\D/g, ''))}
                     placeholder="1234"
                     className="w-16 px-2 py-1 rounded-md bg-black/40 border border-white/[0.06] text-xs text-zinc-100 font-mono text-center tracking-widest focus:outline-none"
                   />
@@ -309,7 +289,7 @@ export const SettingsModal: React.FC = () => {
                     type="submit"
                     className="text-xs text-[#0a84ff] font-medium hover:underline cursor-pointer"
                   >
-                    {pinSaved ? 'Saved' : 'Change'}
+                    {lockPinSaved ? 'Saved' : 'Change'}
                   </button>
                 </div>
               </form>

@@ -1,7 +1,7 @@
 import React from 'react';
 import { useApp } from '../../context/AppContext';
 import { SCREEN_IDENTITIES, TAB_ORDER } from '../../utils/screenIdentities';
-import { Lock, Settings, Menu, Cloud, RefreshCw, Search, Check, LogIn, User as UserIcon } from 'lucide-react';
+import { Lock, Settings, Menu, Cloud, RefreshCw, Search, KeyRound } from 'lucide-react';
 import { triggerHaptic } from '../../utils/haptics';
 
 interface HeaderProps {
@@ -12,8 +12,7 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMenu }) => {
   const {
     currentTab,
     syncStatus,
-    user,
-    signIn,
+    syncPin,
     syncNow,
     lastSyncedTime,
     lockApp,
@@ -59,34 +58,17 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMenu }) => {
           </div>
 
           <div className="flex items-center gap-1.5">
-            {user ? (
-              <button
-                onClick={() => {
-                  triggerHaptic('selection');
-                  setIsSettingsOpen(true);
-                }}
-                className="w-6 h-6 rounded-full overflow-hidden ring-1 ring-white/20 hover:ring-white/40 transition cursor-pointer flex items-center justify-center bg-zinc-800 text-[10px] font-semibold text-white"
-                title={`Logged in as ${user.email}`}
-              >
-                {user.photoURL ? (
-                  <img src={user.photoURL} alt={user.displayName || 'User'} className="w-full h-full object-cover" />
-                ) : (
-                  <span>{(user.displayName || user.email || 'U')[0].toUpperCase()}</span>
-                )}
-              </button>
-            ) : (
-              <button
-                onClick={() => {
-                  triggerHaptic('selection');
-                  signIn();
-                }}
-                className="px-2 py-0.5 rounded-md bg-[#0a84ff]/20 hover:bg-[#0a84ff]/30 text-[#0a84ff] text-[11px] font-medium transition cursor-pointer flex items-center gap-1"
-                title="Sign in with Google to sync"
-              >
-                <LogIn className="w-3 h-3" />
-                <span>Sign In</span>
-              </button>
-            )}
+            <button
+              onClick={() => {
+                triggerHaptic('selection');
+                setIsSettingsOpen(true);
+              }}
+              className="px-2 py-0.5 rounded-md bg-white/[0.06] hover:bg-white/[0.1] active:scale-95 text-zinc-300 hover:text-white font-mono text-[11px] font-semibold transition cursor-pointer flex items-center gap-1"
+              title={`Sync Code #${syncPin} - Tap to change code`}
+            >
+              <span className="text-[#0a84ff]">#</span>
+              <span>{syncPin}</span>
+            </button>
 
             <button
               onClick={() => {
@@ -176,14 +158,12 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMenu }) => {
             className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg hover:bg-white/[0.06] active:scale-95 flex items-center justify-center text-zinc-400 transition cursor-pointer relative"
             title={
               syncStatus === 'syncing'
-                ? 'Syncing to cloud database...'
+                ? `Syncing PIN #${syncPin} to cloud...`
                 : syncStatus === 'offline'
                 ? 'Offline - saved locally, will sync when online'
                 : syncStatus === 'error'
-                ? 'Saved locally (Click to retry cloud sync)'
-                : user
-                ? `Backed up to ${user.email} (${lastSyncedTime ? `Synced at ${lastSyncedTime}` : 'All changes saved'}) - Click to Sync Now`
-                : `All changes saved (Click to Sync Now)`
+                ? `Error syncing PIN #${syncPin} (Click to retry)`
+                : `Synced with Cloud (PIN #${syncPin}${lastSyncedTime ? ` at ${lastSyncedTime}` : ''}) - Click to Sync Now`
             }
           >
             {syncStatus === 'syncing' ? (
@@ -204,40 +184,18 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMenu }) => {
             />
           </button>
 
-          {/* Google Account Profile Button or Sign-in Prompt */}
-          {user ? (
-            <button
-              onClick={() => {
-                triggerHaptic('selection');
-                setIsSettingsOpen(true);
-              }}
-              className="h-7 sm:h-8 px-1.5 rounded-lg hover:bg-white/[0.07] active:scale-95 flex items-center gap-1.5 text-zinc-300 transition cursor-pointer group"
-              title={`Logged in as ${user.email} - View Account Settings`}
-            >
-              <div className="w-5 h-5 sm:w-6 sm:h-6 rounded-full overflow-hidden ring-1 ring-emerald-400/40 flex items-center justify-center bg-zinc-800 text-[10px] font-semibold text-white flex-shrink-0">
-                {user.photoURL ? (
-                  <img src={user.photoURL} alt={user.displayName || 'User'} className="w-full h-full object-cover" />
-                ) : (
-                  <span>{(user.displayName || user.email || 'U')[0].toUpperCase()}</span>
-                )}
-              </div>
-              <span className="text-xs font-medium hidden md:inline truncate max-w-[80px]">
-                {user.displayName?.split(' ')[0] || user.email?.split('@')[0]}
-              </span>
-            </button>
-          ) : (
-            <button
-              onClick={() => {
-                triggerHaptic('selection');
-                signIn();
-              }}
-              className="h-7 sm:h-8 px-2 sm:px-2.5 rounded-lg bg-[#0a84ff]/15 hover:bg-[#0a84ff]/25 active:scale-95 border border-[#0a84ff]/30 text-[#0a84ff] hover:text-white flex items-center gap-1.5 transition cursor-pointer font-medium text-xs"
-              title="Sign in with Google to back up your account anywhere"
-            >
-              <LogIn className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Sign In</span>
-            </button>
-          )}
+          {/* 4-Digit Unique PIN User Badge */}
+          <button
+            onClick={() => {
+              triggerHaptic('selection');
+              setIsSettingsOpen(true);
+            }}
+            className="h-7 sm:h-8 px-2 sm:px-2.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.09] active:scale-95 border border-white/[0.08] flex items-center gap-1.5 text-zinc-200 transition cursor-pointer font-mono"
+            title={`Your unique sync code is #${syncPin}. Enter this code on any tab/device to load your data. Click to change.`}
+          >
+            <KeyRound className="w-3 h-3 text-[#0a84ff]" />
+            <span className="text-xs font-semibold tracking-wider">#{syncPin}</span>
+          </button>
 
           {/* Settings Trigger */}
           <button
@@ -271,3 +229,4 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMenu }) => {
     </header>
   );
 };
+
