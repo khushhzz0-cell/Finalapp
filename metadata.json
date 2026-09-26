@@ -1,0 +1,6 @@
+{
+  "name": "FocusDo - Personal Productivity",
+  "description": "A private, mobile-first personal productivity web app to capture, organize, focus, and get things done.",
+  "requestFramePermissions": ["CAMERA", "MICROPHONE"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
