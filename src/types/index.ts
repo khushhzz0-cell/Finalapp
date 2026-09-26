@@ -195,6 +195,9 @@ export interface ActivityLogEntry {
 export interface DatabaseDump {
   version: number;
   exportedAt: string;
+  ownerId?: string;
+  ownerEmail?: string;
+  lastSyncedAt?: string;
   routines: RoutineItem[];
   habits: HabitItem[];
   projects: ProjectItem[];

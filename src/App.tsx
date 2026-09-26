@@ -6,6 +6,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { Header } from './components/common/Header';
+import { AccountBackupNotice } from './components/common/AccountBackupNotice';
 import { Navigation } from './components/common/Navigation';
 import { GestureCarousel } from './components/navigation/GestureCarousel';
 import { AuthLockScreen } from './components/auth/AuthLockScreen';
@@ -109,6 +110,9 @@ function MainAppContent() {
     >
       {/* Header with Screen Identity title and menu trigger */}
       <Header onToggleMenu={() => setIsMenuOpen(prev => !prev)} />
+
+      {/* Cross-tab & Multi-device Google Account Backup Reminder */}
+      <AccountBackupNotice />
 
       {/* Main View Container: Scales down with iOS spring feel when recent apps switcher opens */}
       <div

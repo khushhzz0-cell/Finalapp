@@ -8,24 +8,63 @@ import {
   getDocFromServer,
   Unsubscribe,
 } from 'firebase/firestore';
-import { getAuth, signInAnonymously } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { DatabaseDump } from '../types';
+import { auth } from './firebaseAuth';
 
-// Initialize Firebase App singleton
+// Initialize Firebase singleton
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-export const firestoreDb = getFirestore(app);
-const auth = getAuth(app);
+export const firestoreDb = (firebaseConfig as any).firestoreDatabaseId
+  ? getFirestore(app, (firebaseConfig as any).firestoreDatabaseId)
+  : getFirestore(app);
 
-// Attempt anonymous sign-in in background so that request.auth is populated if rules require it
-signInAnonymously(auth).catch(err => {
-  // Silent catch: unauthenticated access also works with open rules
-  console.debug('Anonymous auth note:', err?.message);
-});
+// Error handling conforming to Firebase Integration Skill
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
 
-// Single primary workspace document ID for cloud persistence across devices
-const WORKSPACE_COLLECTION = 'workspaces';
-const WORKSPACE_DOC_ID = 'main';
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  };
+}
+
+export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || [],
+    },
+    operationType,
+    path,
+  };
+  console.warn('Firestore Error: ', JSON.stringify(errInfo));
+  return errInfo;
+}
 
 /**
  * Remove undefined values to prevent Firestore unsupported field value errors
@@ -53,7 +92,7 @@ export function subscribeSyncStatus(listener: (status: SyncStatus) => void): () 
   };
 }
 
-function setSyncStatus(status: SyncStatus) {
+export function setSyncStatus(status: SyncStatus) {
   currentSyncStatus = status;
   statusListeners.forEach(fn => fn(status));
 }
@@ -62,8 +101,9 @@ function setSyncStatus(status: SyncStatus) {
  * Test server connection on boot
  */
 export async function testFirestoreConnection(): Promise<boolean> {
+  const testPath = 'workspaces/health_check';
   try {
-    const testDocRef = doc(firestoreDb, WORKSPACE_COLLECTION, 'health_check');
+    const testDocRef = doc(firestoreDb, 'workspaces', 'health_check');
     await getDocFromServer(testDocRef);
     setSyncStatus('connected');
     return true;
@@ -71,19 +111,24 @@ export async function testFirestoreConnection(): Promise<boolean> {
     if (err?.message?.includes('the client is offline') || !navigator.onLine) {
       setSyncStatus('offline');
     } else {
-      console.warn('Firestore connection note:', err?.message);
+      handleFirestoreError(err, OperationType.GET, testPath);
     }
     return false;
   }
 }
 
+// -------------------------------------------------------------
+// USER-SCOPED WORKSPACE PERSISTENCE
+// -------------------------------------------------------------
+
 /**
- * Load workspace data from Firestore
+ * Load user workspace from Firestore
  */
-export async function loadWorkspaceFromFirestore(): Promise<DatabaseDump | null> {
+export async function loadUserWorkspace(userId: string): Promise<DatabaseDump | null> {
+  const docPath = `users/${userId}/workspace/main`;
   try {
     setSyncStatus('syncing');
-    const docRef = doc(firestoreDb, WORKSPACE_COLLECTION, WORKSPACE_DOC_ID);
+    const docRef = doc(firestoreDb, 'users', userId, 'workspace', 'main');
     const snap = await getDoc(docRef);
     if (snap.exists()) {
       const data = snap.data() as DatabaseDump;
@@ -93,19 +138,19 @@ export async function loadWorkspaceFromFirestore(): Promise<DatabaseDump | null>
     setSyncStatus('connected');
     return null;
   } catch (error) {
-    console.error('Failed to load from Firestore:', error);
+    handleFirestoreError(error, OperationType.GET, docPath);
     setSyncStatus('error');
     return null;
   }
 }
 
 let saveTimeout: NodeJS.Timeout | null = null;
-let pendingSavePromise: Promise<void> | null = null;
 
 /**
- * Debounced save to Firestore with status tracking
+ * Save user workspace with debounce and status tracking
  */
-export function saveWorkspaceToFirestore(data: DatabaseDump): Promise<void> {
+export function saveUserWorkspace(userId: string, data: DatabaseDump): Promise<void> {
+  const docPath = `users/${userId}/workspace/main`;
   return new Promise((resolve, reject) => {
     if (saveTimeout) {
       clearTimeout(saveTimeout);
@@ -115,13 +160,17 @@ export function saveWorkspaceToFirestore(data: DatabaseDump): Promise<void> {
 
     saveTimeout = setTimeout(async () => {
       try {
-        const docRef = doc(firestoreDb, WORKSPACE_COLLECTION, WORKSPACE_DOC_ID);
-        const cleaned = sanitizeForFirestore(data);
+        const docRef = doc(firestoreDb, 'users', userId, 'workspace', 'main');
+        const cleaned = sanitizeForFirestore({
+          ...data,
+          ownerId: userId,
+          lastSyncedAt: new Date().toISOString(),
+        });
         await setDoc(docRef, cleaned, { merge: true });
         setSyncStatus('synced');
         resolve();
       } catch (error) {
-        console.error('Failed to write to Firestore:', error);
+        handleFirestoreError(error, OperationType.WRITE, docPath);
         setSyncStatus('error');
         reject(error);
       }
@@ -130,13 +179,15 @@ export function saveWorkspaceToFirestore(data: DatabaseDump): Promise<void> {
 }
 
 /**
- * Subscribe to real-time changes from Firestore (multi-tab / multi-device sync)
+ * Subscribe to real-time changes for a specific user's workspace
  */
-export function subscribeToFirestoreWorkspace(
+export function subscribeToUserWorkspace(
+  userId: string,
   onUpdate: (data: DatabaseDump) => void
 ): Unsubscribe {
-  const docRef = doc(firestoreDb, WORKSPACE_COLLECTION, WORKSPACE_DOC_ID);
-  
+  const docPath = `users/${userId}/workspace/main`;
+  const docRef = doc(firestoreDb, 'users', userId, 'workspace', 'main');
+
   return onSnapshot(
     docRef,
     snapshot => {
@@ -147,7 +198,85 @@ export function subscribeToFirestoreWorkspace(
       }
     },
     error => {
-      console.warn('Firestore snapshot subscription warning:', error.message);
+      handleFirestoreError(error, OperationType.GET, docPath);
+      if (!navigator.onLine) {
+        setSyncStatus('offline');
+      } else {
+        setSyncStatus('error');
+      }
+    }
+  );
+}
+
+// -------------------------------------------------------------
+// UN-AUTHENTICATED / SHARED FALLBACK WORKSPACE
+// -------------------------------------------------------------
+
+export async function loadWorkspaceFromFirestore(): Promise<DatabaseDump | null> {
+  const docPath = 'workspaces/main';
+  try {
+    setSyncStatus('syncing');
+    const docRef = doc(firestoreDb, 'workspaces', 'main');
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      const data = snap.data() as DatabaseDump;
+      setSyncStatus('synced');
+      return data;
+    }
+    setSyncStatus('connected');
+    return null;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, docPath);
+    setSyncStatus('error');
+    return null;
+  }
+}
+
+export function saveWorkspaceToFirestore(data: DatabaseDump): Promise<void> {
+  const docPath = 'workspaces/main';
+  return new Promise((resolve, reject) => {
+    if (saveTimeout) {
+      clearTimeout(saveTimeout);
+    }
+
+    setSyncStatus('syncing');
+
+    saveTimeout = setTimeout(async () => {
+      try {
+        const docRef = doc(firestoreDb, 'workspaces', 'main');
+        const cleaned = sanitizeForFirestore({
+          ...data,
+          lastSyncedAt: new Date().toISOString(),
+        });
+        await setDoc(docRef, cleaned, { merge: true });
+        setSyncStatus('synced');
+        resolve();
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, docPath);
+        setSyncStatus('error');
+        reject(error);
+      }
+    }, 350);
+  });
+}
+
+export function subscribeToFirestoreWorkspace(
+  onUpdate: (data: DatabaseDump) => void
+): Unsubscribe {
+  const docPath = 'workspaces/main';
+  const docRef = doc(firestoreDb, 'workspaces', 'main');
+
+  return onSnapshot(
+    docRef,
+    snapshot => {
+      if (snapshot.exists()) {
+        const data = snapshot.data() as DatabaseDump;
+        setSyncStatus('synced');
+        onUpdate(data);
+      }
+    },
+    error => {
+      handleFirestoreError(error, OperationType.GET, docPath);
       if (!navigator.onLine) {
         setSyncStatus('offline');
       } else {

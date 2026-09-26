@@ -44,9 +44,25 @@
         "exportedAt": { "type": "string" }
       },
       "required": ["version"]
+    },
+    "UserWorkspace": {
+      "title": "UserWorkspace",
+      "description": "Per-user private productivity workspace data",
+      "type": "object",
+      "properties": {
+        "version": { "type": "number" },
+        "exportedAt": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "ownerEmail": { "type": "string" }
+      },
+      "required": ["version"]
     }
   },
   "firestore": {
+    "/users/{userId}/workspace/{docId}": {
+      "schema": "UserWorkspace",
+      "description": "Per-user private workspace document holding routines, habits, projects, learning, and reminders"
+    },
     "/workspace/{docId}": {
       "schema": "DatabaseDump",
       "description": "Workspace data document containing projects, routines, habits, learning, phases, seasons, and notes"
