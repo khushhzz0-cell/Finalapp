@@ -10,6 +10,7 @@ import { Navigation } from './components/common/Navigation';
 import { GestureCarousel } from './components/navigation/GestureCarousel';
 import { AuthLockScreen } from './components/auth/AuthLockScreen';
 import { SettingsModal } from './components/auth/SettingsModal';
+import { SyncCodeModal } from './components/auth/SyncCodeModal';
 import { ExcelArchiveModal } from './components/common/ExcelArchiveModal';
 import { QuickActionsPill } from './components/common/QuickActionsPill';
 import { UniversalSearchModal } from './components/common/UniversalSearchModal';
@@ -143,6 +144,9 @@ function MainAppContent() {
 
       {/* Settings Modal */}
       <SettingsModal />
+
+      {/* Unique User Sync Code Modal */}
+      <SyncCodeModal />
 
       {/* Excel Lifetime Archive Modal */}
       <ExcelArchiveModal

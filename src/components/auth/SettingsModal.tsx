@@ -36,6 +36,7 @@ export const SettingsModal: React.FC = () => {
     syncNow,
     syncStatus,
     lastSyncedTime,
+    setIsSyncCodeModalOpen,
   } = useApp();
 
   const [pinInput, setPinInput] = useState(syncPin);
@@ -221,7 +222,18 @@ export const SettingsModal: React.FC = () => {
                   Enter this same 4-digit code on any other tab, browser, or device to load your exact workspace. Entering a different 4-digit code will immediately switch to that code&apos;s isolated workspace without mixing data.
                 </p>
 
-                <div className="pt-1 flex items-center justify-end">
+                <div className="pt-1 flex items-center justify-between">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSettingsOpen(false);
+                      setIsSyncCodeModalOpen(true);
+                    }}
+                    className="text-[#0a84ff] hover:underline text-[11px] font-medium cursor-pointer"
+                  >
+                    Open Code Switcher...
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => syncNow()}

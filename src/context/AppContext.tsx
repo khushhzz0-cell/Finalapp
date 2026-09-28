@@ -20,13 +20,15 @@ import {
 import { DEFAULT_SETTINGS, storage } from '../db/storage';
 import { downloadExcelArchive } from '../utils/excelExport';
 import {
-  testFirestoreConnection,
+  testServerConnection,
   loadPinWorkspace,
   savePinWorkspace,
   subscribeToPinWorkspace,
   subscribeSyncStatus,
+  checkPinExists,
+  cleanPin,
   SyncStatus,
-} from '../services/firestoreSync';
+} from '../services/pinSyncService';
 import { triggerHaptic } from '../utils/haptics';
 
 interface AppContextType {
@@ -39,9 +41,11 @@ interface AppContextType {
 
   // 4-Digit Unique User Code & Cloud Sync
   syncPin: string;
-  setSyncPin: (newPin: string) => Promise<void>;
+  setSyncPin: (newPin: string, mode?: 'auto' | 'migrate' | 'fresh') => Promise<void>;
   syncNow: () => Promise<void>;
   lastSyncedTime: string | null;
+  isSyncCodeModalOpen: boolean;
+  setIsSyncCodeModalOpen: (open: boolean) => void;
 
   // Auth / Privacy
   isLocked: boolean;
@@ -255,86 +259,198 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [activityLog, setActivityLog] = useState<ActivityLogEntry[]>([]);
   const [isReady, setIsReady] = useState(false);
 
+  // Maintain refs for atomic, always-fresh reads to prevent stale closure data loss
+  const routinesRef = React.useRef(routines);
+  routinesRef.current = routines;
+  const habitsRef = React.useRef(habits);
+  habitsRef.current = habits;
+  const projectsRef = React.useRef(projects);
+  projectsRef.current = projects;
+  const learningRef = React.useRef(learning);
+  learningRef.current = learning;
+  const phasesRef = React.useRef(phases);
+  phasesRef.current = phases;
+  const seasonsRef = React.useRef(seasons);
+  seasonsRef.current = seasons;
+  const roughRef = React.useRef(rough);
+  roughRef.current = rough;
+  const remindersRef = React.useRef(reminders);
+  remindersRef.current = reminders;
+  const settingsRef = React.useRef(settings);
+  settingsRef.current = settings;
+  const activityLogRef = React.useRef(activityLog);
+  activityLogRef.current = activityLog;
+
+  // Track latest local export timestamp (epoch ms) to prevent older remote snapshots from clobbering recent local clicks
+  const lastLocalExportedAtRef = React.useRef<number>(Date.now());
+
   // 4-Digit Unique User Code & Cloud Sync State
-  const [syncPin, setSyncPinState] = useState<string>(() => {
-    try {
-      return localStorage.getItem('focusdo_sync_pin') || '1234';
-    } catch {
-      return '1234';
-    }
-  });
+  const [syncPin, setSyncPinState] = useState<string>(() => storage.getActivePin());
   const [lastSyncedTime, setLastSyncedTime] = useState<string | null>(null);
+  const [isSyncCodeModalOpen, setIsSyncCodeModalOpen] = useState<boolean>(false);
 
   // Ref to ensure save/persist always targets the currently active PIN
   const syncPinRef = React.useRef<string>(syncPin);
   syncPinRef.current = syncPin;
   const unsubPinSnapshotRef = React.useRef<(() => void) | null>(null);
 
-  // Initialize DB on boot & Sync with Cloud Firestore using the 4-digit code
+  // Initialize DB on boot & Sync with Server using the 4-digit code
   useEffect(() => {
     const unsubStatus = subscribeSyncStatus(setSyncStatus);
-    const initialPin = syncPinRef.current;
+    const activePin = storage.getActivePin();
+    syncPinRef.current = activePin;
+    setSyncPinState(activePin);
 
     async function initialBoot() {
-      // 1. Instant local load
-      const dump = await storage.init();
-      setRoutines(dump.routines || []);
-      setHabits(dump.habits || []);
-      setProjects(dump.projects || []);
-      setLearning(dump.learning || []);
-      setPhases(dump.phases || []);
-      setSeasons(dump.seasons || []);
-      setRough(dump.rough || []);
-      setReminders(dump.reminders || []);
-      setSettings(dump.settings || DEFAULT_SETTINGS);
-      setActivityLog(dump.activityLog || []);
+      // 1. Instant local load for active PIN
+      const dump = await storage.init(activePin);
+      const r = dump.routines || [];
+      const h = dump.habits || [];
+      const p = dump.projects || [];
+      const l = dump.learning || [];
+      const ph = dump.phases || [];
+      const s = dump.seasons || [];
+      const ro = dump.rough || [];
+      const rm = dump.reminders || [];
+      const st = dump.settings || DEFAULT_SETTINGS;
+      const act = dump.activityLog || [];
+
+      routinesRef.current = r;
+      habitsRef.current = h;
+      projectsRef.current = p;
+      learningRef.current = l;
+      phasesRef.current = ph;
+      seasonsRef.current = s;
+      roughRef.current = ro;
+      remindersRef.current = rm;
+      settingsRef.current = st;
+      activityLogRef.current = act;
+
+      setRoutines(r);
+      setHabits(h);
+      setProjects(p);
+      setLearning(l);
+      setPhases(ph);
+      setSeasons(s);
+      setRough(ro);
+      setReminders(rm);
+      setSettings(st);
+      setActivityLog(act);
 
       if (dump.settings && !dump.settings.isPinEnabled) {
         setIsLocked(false);
       }
       setIsReady(true);
 
-      // 2. Test Firestore connection
-      testFirestoreConnection().catch(() => {});
+      // 2. Test server connectivity
+      testServerConnection().catch(() => {});
 
-      // 3. Connect to cloud workspace for this PIN
+      // 3. Connect to cloud workspace for active PIN
       try {
-        const remoteDump = await loadPinWorkspace(initialPin);
+        const remoteDump = await loadPinWorkspace(activePin);
         if (remoteDump) {
-          if (remoteDump.routines) setRoutines(remoteDump.routines);
-          if (remoteDump.habits) setHabits(remoteDump.habits);
-          if (remoteDump.projects) setProjects(remoteDump.projects);
-          if (remoteDump.learning) setLearning(remoteDump.learning);
-          if (remoteDump.phases) setPhases(remoteDump.phases);
-          if (remoteDump.seasons) setSeasons(remoteDump.seasons);
-          if (remoteDump.rough) setRough(remoteDump.rough);
-          if (remoteDump.reminders) setReminders(remoteDump.reminders);
-          if (remoteDump.settings) setSettings(remoteDump.settings);
-          if (remoteDump.activityLog) setActivityLog(remoteDump.activityLog);
-          storage.save(remoteDump);
+          if (remoteDump.routines) {
+            routinesRef.current = remoteDump.routines;
+            setRoutines(remoteDump.routines);
+          }
+          if (remoteDump.habits) {
+            habitsRef.current = remoteDump.habits;
+            setHabits(remoteDump.habits);
+          }
+          if (remoteDump.projects) {
+            projectsRef.current = remoteDump.projects;
+            setProjects(remoteDump.projects);
+          }
+          if (remoteDump.learning) {
+            learningRef.current = remoteDump.learning;
+            setLearning(remoteDump.learning);
+          }
+          if (remoteDump.phases) {
+            phasesRef.current = remoteDump.phases;
+            setPhases(remoteDump.phases);
+          }
+          if (remoteDump.seasons) {
+            seasonsRef.current = remoteDump.seasons;
+            setSeasons(remoteDump.seasons);
+          }
+          if (remoteDump.rough) {
+            roughRef.current = remoteDump.rough;
+            setRough(remoteDump.rough);
+          }
+          if (remoteDump.reminders) {
+            remindersRef.current = remoteDump.reminders;
+            setReminders(remoteDump.reminders);
+          }
+          if (remoteDump.settings) {
+            settingsRef.current = remoteDump.settings;
+            setSettings(remoteDump.settings);
+          }
+          if (remoteDump.activityLog) {
+            activityLogRef.current = remoteDump.activityLog;
+            setActivityLog(remoteDump.activityLog);
+          }
+          storage.save(remoteDump, activePin);
         } else {
           // If remote doesn't exist yet, save current local state to this PIN
-          await savePinWorkspace(initialPin, dump);
+          await savePinWorkspace(activePin, dump, true);
         }
         setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
       } catch (err) {
-        console.warn('Initial PIN cloud sync error:', err);
+        console.warn('Initial PIN cloud sync note:', err);
       }
 
-      // 4. Real-time Firestore sync across tabs, browsers, and devices for this PIN
-      unsubPinSnapshotRef.current = subscribeToPinWorkspace(initialPin, (remoteDump) => {
-        if (remoteDump && syncPinRef.current === initialPin) {
-          if (remoteDump.routines) setRoutines(remoteDump.routines);
-          if (remoteDump.habits) setHabits(remoteDump.habits);
-          if (remoteDump.projects) setProjects(remoteDump.projects);
-          if (remoteDump.learning) setLearning(remoteDump.learning);
-          if (remoteDump.phases) setPhases(remoteDump.phases);
-          if (remoteDump.seasons) setSeasons(remoteDump.seasons);
-          if (remoteDump.rough) setRough(remoteDump.rough);
-          if (remoteDump.reminders) setReminders(remoteDump.reminders);
-          if (remoteDump.settings) setSettings(remoteDump.settings);
-          if (remoteDump.activityLog) setActivityLog(remoteDump.activityLog);
-          storage.save(remoteDump);
+      // 4. Real-time live sync across tabs, browsers, and devices for this PIN
+      unsubPinSnapshotRef.current = subscribeToPinWorkspace(activePin, (remoteDump) => {
+        if (remoteDump && syncPinRef.current === activePin) {
+          // Guard: ignore stale remote updates if our local state has newer user actions
+          if (remoteDump.exportedAt) {
+            const remoteTime = new Date(remoteDump.exportedAt).getTime();
+            if (remoteTime <= lastLocalExportedAtRef.current) {
+              return;
+            }
+          }
+
+          if (remoteDump.routines) {
+            routinesRef.current = remoteDump.routines;
+            setRoutines(remoteDump.routines);
+          }
+          if (remoteDump.habits) {
+            habitsRef.current = remoteDump.habits;
+            setHabits(remoteDump.habits);
+          }
+          if (remoteDump.projects) {
+            projectsRef.current = remoteDump.projects;
+            setProjects(remoteDump.projects);
+          }
+          if (remoteDump.learning) {
+            learningRef.current = remoteDump.learning;
+            setLearning(remoteDump.learning);
+          }
+          if (remoteDump.phases) {
+            phasesRef.current = remoteDump.phases;
+            setPhases(remoteDump.phases);
+          }
+          if (remoteDump.seasons) {
+            seasonsRef.current = remoteDump.seasons;
+            setSeasons(remoteDump.seasons);
+          }
+          if (remoteDump.rough) {
+            roughRef.current = remoteDump.rough;
+            setRough(remoteDump.rough);
+          }
+          if (remoteDump.reminders) {
+            remindersRef.current = remoteDump.reminders;
+            setReminders(remoteDump.reminders);
+          }
+          if (remoteDump.settings) {
+            settingsRef.current = remoteDump.settings;
+            setSettings(remoteDump.settings);
+          }
+          if (remoteDump.activityLog) {
+            activityLogRef.current = remoteDump.activityLog;
+            setActivityLog(remoteDump.activityLog);
+          }
+          storage.save(remoteDump, activePin);
           setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
         }
       });
@@ -350,41 +466,116 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // Save changes to persistent storage AND cloud database (Firestore) for current PIN
+  // Save changes to persistent storage AND server sync for current PIN
+  // Supports both object options `{ routines: updated, activityLog: nextLog }` and positional legacy arguments
   const persist = (
-    nextRoutines = routines,
-    nextHabits = habits,
-    nextProjects = projects,
-    nextLearning = learning,
-    nextPhases = phases,
-    nextSeasons = seasons,
-    nextRough = rough,
-    nextReminders = reminders,
-    nextSettings = settings,
-    nextActivityLog = activityLog
+    nextRoutines?: RoutineItem[] | {
+      routines?: RoutineItem[];
+      habits?: HabitItem[];
+      projects?: ProjectItem[];
+      learning?: LearningItem[];
+      phases?: PhaseItem[];
+      seasons?: SeasonItem[];
+      rough?: RoughItem[];
+      reminders?: ReminderItem[];
+      settings?: AppSettings;
+      activityLog?: ActivityLogEntry[];
+    },
+    nextHabits?: HabitItem[],
+    nextProjects?: ProjectItem[],
+    nextLearning?: LearningItem[],
+    nextPhases?: PhaseItem[],
+    nextSeasons?: SeasonItem[],
+    nextRough?: RoughItem[],
+    nextReminders?: ReminderItem[],
+    nextSettings?: AppSettings,
+    nextActivityLog?: ActivityLogEntry[]
   ) => {
     if (!isReady) return;
     const currentPin = syncPinRef.current;
+
+    let targetRoutines = routinesRef.current;
+    let targetHabits = habitsRef.current;
+    let targetProjects = projectsRef.current;
+    let targetLearning = learningRef.current;
+    let targetPhases = phasesRef.current;
+    let targetSeasons = seasonsRef.current;
+    let targetRough = roughRef.current;
+    let targetReminders = remindersRef.current;
+    let targetSettings = settingsRef.current;
+    let targetActivityLog = activityLogRef.current;
+
+    if (nextRoutines && !Array.isArray(nextRoutines) && typeof nextRoutines === 'object') {
+      const opts = nextRoutines as {
+        routines?: RoutineItem[];
+        habits?: HabitItem[];
+        projects?: ProjectItem[];
+        learning?: LearningItem[];
+        phases?: PhaseItem[];
+        seasons?: SeasonItem[];
+        rough?: RoughItem[];
+        reminders?: ReminderItem[];
+        settings?: AppSettings;
+        activityLog?: ActivityLogEntry[];
+      };
+      if (opts.routines !== undefined) targetRoutines = opts.routines;
+      if (opts.habits !== undefined) targetHabits = opts.habits;
+      if (opts.projects !== undefined) targetProjects = opts.projects;
+      if (opts.learning !== undefined) targetLearning = opts.learning;
+      if (opts.phases !== undefined) targetPhases = opts.phases;
+      if (opts.seasons !== undefined) targetSeasons = opts.seasons;
+      if (opts.rough !== undefined) targetRough = opts.rough;
+      if (opts.reminders !== undefined) targetReminders = opts.reminders;
+      if (opts.settings !== undefined) targetSettings = opts.settings;
+      if (opts.activityLog !== undefined) targetActivityLog = opts.activityLog;
+    } else {
+      if (Array.isArray(nextRoutines)) targetRoutines = nextRoutines;
+      if (nextHabits !== undefined) targetHabits = nextHabits;
+      if (nextProjects !== undefined) targetProjects = nextProjects;
+      if (nextLearning !== undefined) targetLearning = nextLearning;
+      if (nextPhases !== undefined) targetPhases = nextPhases;
+      if (nextSeasons !== undefined) targetSeasons = nextSeasons;
+      if (nextRough !== undefined) targetRough = nextRough;
+      if (nextReminders !== undefined) targetReminders = nextReminders;
+      if (nextSettings !== undefined) targetSettings = nextSettings;
+      if (nextActivityLog !== undefined) targetActivityLog = nextActivityLog;
+    }
+
+    // Keep refs in sync immediately
+    routinesRef.current = targetRoutines;
+    habitsRef.current = targetHabits;
+    projectsRef.current = targetProjects;
+    learningRef.current = targetLearning;
+    phasesRef.current = targetPhases;
+    seasonsRef.current = targetSeasons;
+    roughRef.current = targetRough;
+    remindersRef.current = targetReminders;
+    settingsRef.current = targetSettings;
+    activityLogRef.current = targetActivityLog;
+
+    const nowIso = new Date().toISOString();
+    lastLocalExportedAtRef.current = Date.now();
+
     const dump: DatabaseDump = {
       version: 1,
-      exportedAt: new Date().toISOString(),
+      exportedAt: nowIso,
       ownerPin: currentPin,
-      routines: nextRoutines,
-      habits: nextHabits,
-      projects: nextProjects,
-      learning: nextLearning,
-      phases: nextPhases,
-      seasons: nextSeasons,
-      rough: nextRough,
-      reminders: nextReminders,
-      settings: nextSettings,
-      activityLog: nextActivityLog,
+      routines: targetRoutines,
+      habits: targetHabits,
+      projects: targetProjects,
+      learning: targetLearning,
+      phases: targetPhases,
+      seasons: targetSeasons,
+      rough: targetRough,
+      reminders: targetReminders,
+      settings: targetSettings,
+      activityLog: targetActivityLog,
     };
 
-    // Save locally for instant offline performance
-    storage.save(dump);
+    // Save locally for instant offline performance (isolated to currentPin!)
+    storage.save(dump, currentPin);
 
-    // Save directly to Firestore for this specific 4-digit PIN!
+    // Save directly to server backend for this specific 4-digit PIN!
     savePinWorkspace(currentPin, dump)
       .then(() => {
         setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
@@ -415,59 +606,123 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
 
     try {
-      await savePinWorkspace(currentPin, dump);
+      await savePinWorkspace(currentPin, dump, true);
       setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
       setSyncStatus('synced');
       triggerHaptic('success');
-    } catch (e) {
+    } catch {
       setSyncStatus('error');
       triggerHaptic('warning');
     }
   };
 
-  const setSyncPin = async (rawPin: string) => {
-    const cleanPin = rawPin.replace(/\D/g, '').slice(0, 4);
-    if (!cleanPin || cleanPin.length !== 4) return;
-    if (cleanPin === syncPinRef.current) {
+  const setSyncPin = async (
+    rawPin: string,
+    mode: 'auto' | 'migrate' | 'fresh' = 'auto'
+  ) => {
+    const targetPin = cleanPin(rawPin);
+    if (!targetPin || targetPin.length !== 4) return;
+    if (targetPin === syncPinRef.current) {
       await syncNow();
       return;
     }
 
     triggerHaptic('selection');
     setSyncStatus('syncing');
-    setSyncPinState(cleanPin);
-    syncPinRef.current = cleanPin;
-    try {
-      localStorage.setItem('focusdo_sync_pin', cleanPin);
-    } catch {}
 
-    // Unsubscribe from previous PIN listener
+    // 1. Unsubscribe from previous PIN listener
     if (unsubPinSnapshotRef.current) {
       unsubPinSnapshotRef.current();
       unsubPinSnapshotRef.current = null;
     }
 
+    const previousPin = syncPinRef.current;
+    syncPinRef.current = targetPin;
+    setSyncPinState(targetPin);
+    storage.setActivePin(targetPin);
+
     try {
-      const remoteDump = await loadPinWorkspace(cleanPin);
+      // 2. Check if remote data exists for targetPin
+      const remoteDump = await loadPinWorkspace(targetPin);
+
       if (remoteDump) {
-        // Load existing PIN data - cleanly isolate to this PIN!
-        setRoutines(remoteDump.routines || []);
-        setHabits(remoteDump.habits || []);
-        setProjects(remoteDump.projects || []);
-        setLearning(remoteDump.learning || []);
-        setPhases(remoteDump.phases || []);
-        setSeasons(remoteDump.seasons || []);
-        setRough(remoteDump.rough || []);
-        setReminders(remoteDump.reminders || []);
-        setSettings(remoteDump.settings || DEFAULT_SETTINGS);
-        setActivityLog(remoteDump.activityLog || []);
-        storage.save(remoteDump);
+        // Target PIN already exists in cloud: cleanly load it!
+        routinesRef.current = remoteDump.routines || [];
+        habitsRef.current = remoteDump.habits || [];
+        projectsRef.current = remoteDump.projects || [];
+        learningRef.current = remoteDump.learning || [];
+        phasesRef.current = remoteDump.phases || [];
+        seasonsRef.current = remoteDump.seasons || [];
+        roughRef.current = remoteDump.rough || [];
+        remindersRef.current = remoteDump.reminders || [];
+        settingsRef.current = remoteDump.settings || DEFAULT_SETTINGS;
+        activityLogRef.current = remoteDump.activityLog || [];
+
+        setRoutines(routinesRef.current);
+        setHabits(habitsRef.current);
+        setProjects(projectsRef.current);
+        setLearning(learningRef.current);
+        setPhases(phasesRef.current);
+        setSeasons(seasonsRef.current);
+        setRough(roughRef.current);
+        setReminders(remindersRef.current);
+        setSettings(settingsRef.current);
+        setActivityLog(activityLogRef.current);
+        storage.save(remoteDump, targetPin);
+      } else if (storage.hasLocalDataForPin(targetPin)) {
+        // Target PIN has local cached data
+        const localDump = await storage.init(targetPin);
+        routinesRef.current = localDump.routines || [];
+        habitsRef.current = localDump.habits || [];
+        projectsRef.current = localDump.projects || [];
+        learningRef.current = localDump.learning || [];
+        phasesRef.current = localDump.phases || [];
+        seasonsRef.current = localDump.seasons || [];
+        roughRef.current = localDump.rough || [];
+        remindersRef.current = localDump.reminders || [];
+        settingsRef.current = localDump.settings || DEFAULT_SETTINGS;
+        activityLogRef.current = localDump.activityLog || [];
+
+        setRoutines(routinesRef.current);
+        setHabits(habitsRef.current);
+        setProjects(projectsRef.current);
+        setLearning(learningRef.current);
+        setPhases(phasesRef.current);
+        setSeasons(seasonsRef.current);
+        setRough(roughRef.current);
+        setReminders(remindersRef.current);
+        setSettings(settingsRef.current);
+        setActivityLog(activityLogRef.current);
+        await savePinWorkspace(targetPin, localDump, true);
+      } else if (
+        mode === 'migrate' ||
+        (mode === 'auto' && (previousPin === '1000' || previousPin === '1234') && (routinesRef.current.length > 0 || projectsRef.current.length > 0))
+      ) {
+        // User is assigning their custom code for the first time from default 1000/1234:
+        // Migrate current workspace data to this new PIN so their work is NOT lost!
+        const migratedDump: DatabaseDump = {
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          ownerPin: targetPin,
+          routines: routinesRef.current,
+          habits: habitsRef.current,
+          projects: projectsRef.current,
+          learning: learningRef.current,
+          phases: phasesRef.current,
+          seasons: seasonsRef.current,
+          rough: roughRef.current,
+          reminders: remindersRef.current,
+          settings: settingsRef.current,
+          activityLog: activityLogRef.current,
+        };
+        storage.save(migratedDump, targetPin);
+        await savePinWorkspace(targetPin, migratedDump, true);
       } else {
-        // Brand new PIN: start completely clean so data is NOT mixed!
+        // Brand new PIN: start completely clean with isolated workspace!
         const freshDump: DatabaseDump = {
           version: 1,
           exportedAt: new Date().toISOString(),
-          ownerPin: cleanPin,
+          ownerPin: targetPin,
           routines: [],
           habits: [],
           projects: [],
@@ -479,6 +734,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           settings: DEFAULT_SETTINGS,
           activityLog: [],
         };
+        routinesRef.current = [];
+        habitsRef.current = [];
+        projectsRef.current = [];
+        learningRef.current = [];
+        phasesRef.current = [];
+        seasonsRef.current = [];
+        roughRef.current = [];
+        remindersRef.current = [];
+        settingsRef.current = DEFAULT_SETTINGS;
+        activityLogRef.current = [];
+
         setRoutines([]);
         setHabits([]);
         setProjects([]);
@@ -489,28 +755,64 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setReminders([]);
         setSettings(DEFAULT_SETTINGS);
         setActivityLog([]);
-        storage.save(freshDump);
-        await savePinWorkspace(cleanPin, freshDump);
+        storage.save(freshDump, targetPin);
+        await savePinWorkspace(targetPin, freshDump, true);
       }
 
       setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
       setSyncStatus('synced');
       triggerHaptic('success');
 
-      // Attach real-time snapshot listener for this new PIN
-      unsubPinSnapshotRef.current = subscribeToPinWorkspace(cleanPin, (updated) => {
-        if (updated && syncPinRef.current === cleanPin) {
-          if (updated.routines) setRoutines(updated.routines);
-          if (updated.habits) setHabits(updated.habits);
-          if (updated.projects) setProjects(updated.projects);
-          if (updated.learning) setLearning(updated.learning);
-          if (updated.phases) setPhases(updated.phases);
-          if (updated.seasons) setSeasons(updated.seasons);
-          if (updated.rough) setRough(updated.rough);
-          if (updated.reminders) setReminders(updated.reminders);
-          if (updated.settings) setSettings(updated.settings);
-          if (updated.activityLog) setActivityLog(updated.activityLog);
-          storage.save(updated);
+      // 3. Attach real-time subscription for targetPin
+      unsubPinSnapshotRef.current = subscribeToPinWorkspace(targetPin, (updated) => {
+        if (updated && syncPinRef.current === targetPin) {
+          if (updated.exportedAt) {
+            const remoteTime = new Date(updated.exportedAt).getTime();
+            if (remoteTime <= lastLocalExportedAtRef.current) {
+              return;
+            }
+          }
+          if (updated.routines) {
+            routinesRef.current = updated.routines;
+            setRoutines(updated.routines);
+          }
+          if (updated.habits) {
+            habitsRef.current = updated.habits;
+            setHabits(updated.habits);
+          }
+          if (updated.projects) {
+            projectsRef.current = updated.projects;
+            setProjects(updated.projects);
+          }
+          if (updated.learning) {
+            learningRef.current = updated.learning;
+            setLearning(updated.learning);
+          }
+          if (updated.phases) {
+            phasesRef.current = updated.phases;
+            setPhases(updated.phases);
+          }
+          if (updated.seasons) {
+            seasonsRef.current = updated.seasons;
+            setSeasons(updated.seasons);
+          }
+          if (updated.rough) {
+            roughRef.current = updated.rough;
+            setRough(updated.rough);
+          }
+          if (updated.reminders) {
+            remindersRef.current = updated.reminders;
+            setReminders(updated.reminders);
+          }
+          if (updated.settings) {
+            settingsRef.current = updated.settings;
+            setSettings(updated.settings);
+          }
+          if (updated.activityLog) {
+            activityLogRef.current = updated.activityLog;
+            setActivityLog(updated.activityLog);
+          }
+          storage.save(updated, targetPin);
           setLastSyncedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
         }
       });
@@ -521,24 +823,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  // Lifetime Activity Logging
-  const logActivity = (entry: Omit<ActivityLogEntry, 'id' | 'timestamp' | 'date' | 'time'>) => {
+  // Helper to format activity entries reliably
+  const createActivityEntry = (entry: Omit<ActivityLogEntry, 'id' | 'timestamp' | 'date' | 'time'>): ActivityLogEntry => {
     const now = new Date();
     const dateStr = getTodayDateStr();
     const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-    const newEntry: ActivityLogEntry = {
+    return {
       ...entry,
       id: `act_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       timestamp: now.toISOString(),
       date: dateStr,
       time: timeStr,
     };
+  };
 
-    setActivityLog(prev => {
-      const updated = [newEntry, ...prev];
-      persist(routines, habits, projects, learning, phases, seasons, rough, reminders, settings, updated);
-      return updated;
-    });
+  // Lifetime Activity Logging: atomically updates log state and persists without clobbering other states
+  const logActivity = (entry: Omit<ActivityLogEntry, 'id' | 'timestamp' | 'date' | 'time'>) => {
+    const newEntry = createActivityEntry(entry);
+    const updated = [newEntry, ...activityLogRef.current];
+    activityLogRef.current = updated;
+    setActivityLog(updated);
+    persist({ activityLog: updated });
   };
 
   const exportToExcel = () => {
@@ -634,7 +939,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const toggleRoutineSlot = (id: string, slotIndex: number, dateStr = getTodayDateStr()) => {
-    const updated = routines.map(rt => {
+    let activityToLog: ActivityLogEntry | null = null;
+
+    const updated = routinesRef.current.map(rt => {
       if (rt.id !== id) return rt;
 
       let periodCompletions: string[] = [];
@@ -676,7 +983,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           : dateStr;
         nextDates.push(newEntry);
 
-        logActivity({
+        activityToLog = createActivityEntry({
           type: 'routine',
           title: rt.title,
           parentName: rt.scheduleType.replace(/_/g, ' ').toUpperCase(),
@@ -688,8 +995,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return { ...rt, completedDates: nextDates };
     });
 
+    routinesRef.current = updated;
     setRoutines(updated);
-    persist(updated);
+
+    if (activityToLog) {
+      const nextLog = [activityToLog, ...activityLogRef.current];
+      activityLogRef.current = nextLog;
+      setActivityLog(nextLog);
+      persist({ routines: updated, activityLog: nextLog });
+    } else {
+      persist({ routines: updated });
+    }
   };
 
   const isRoutineScheduledForToday = (item: RoutineItem, dateStr = getTodayDateStr()): boolean => {
@@ -884,9 +1200,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const toggleHabitCompletion = (id: string, dateStr = getTodayDateStr()) => {
-    const habit = habits.find(h => h.id === id);
+    let activityToLog: ActivityLogEntry | null = null;
+    const habit = habitsRef.current.find(h => h.id === id);
     if (habit && !habit.completedDates.includes(dateStr)) {
-      logActivity({
+      activityToLog = createActivityEntry({
         type: 'habit',
         title: habit.title,
         parentName: '14-Day Habit Trial',
@@ -895,7 +1212,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       });
     }
 
-    const updated = habits.map(h => {
+    const updated = habitsRef.current.map(h => {
       if (h.id !== id) return h;
       const completed = h.completedDates || [];
       const missed = h.missedDates || [];
@@ -906,8 +1223,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const nextMissed = missed.filter(d => d !== dateStr);
       return { ...h, completedDates: nextDates, missedDates: nextMissed };
     });
+
+    habitsRef.current = updated;
     setHabits(updated);
-    persist(routines, updated);
+
+    if (activityToLog) {
+      const nextLog = [activityToLog, ...activityLogRef.current];
+      activityLogRef.current = nextLog;
+      setActivityLog(nextLog);
+      persist({ habits: updated, activityLog: nextLog });
+    } else {
+      persist({ habits: updated });
+    }
   };
 
   // 3-state tracking: Untouched -> Done (✓) -> Missed (✕) -> Untouched
@@ -1000,10 +1327,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const toggleSubtask = (projectId: string, subtaskId: string) => {
-    const proj = projects.find(p => p.id === projectId);
+    let activityToLog: ActivityLogEntry | null = null;
+    const proj = projectsRef.current.find(p => p.id === projectId);
     const subtask = proj?.subtasks.find(st => st.id === subtaskId);
     if (proj && subtask && !subtask.completed) {
-      logActivity({
+      activityToLog = createActivityEntry({
         type: proj.isPriority ? 'parent_task' : 'subtask',
         title: subtask.text,
         parentName: proj.name,
@@ -1012,7 +1340,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       });
     }
 
-    const updated = projects.map(p => {
+    const updated = projectsRef.current.map(p => {
       if (p.id !== projectId) return p;
       const currentCompletedOrders = p.subtasks
         .filter(st => st.completed && typeof st.completedOrder === 'number')
@@ -1031,8 +1359,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       });
       return { ...p, subtasks: nextSubtasks };
     });
+
+    projectsRef.current = updated;
     setProjects(updated);
-    persist(routines, habits, updated);
+
+    if (activityToLog) {
+      const nextLog = [activityToLog, ...activityLogRef.current];
+      activityLogRef.current = nextLog;
+      setActivityLog(nextLog);
+      persist({ projects: updated, activityLog: nextLog });
+    } else {
+      persist({ projects: updated });
+    }
   };
 
   const addSubtask = (projectId: string, text: string) => {
@@ -1199,19 +1537,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       createdAt: new Date(now + idx * 10).toISOString(),
     }));
 
-    newItems.forEach(newItem => {
-      logActivity({
+    const newLogs: ActivityLogEntry[] = newItems.map(newItem =>
+      createActivityEntry({
         type: 'quick_note',
         title: newItem.text,
         parentName: newItem.category,
         status: 'created',
         details: 'Recorded in quick notes',
-      });
-    });
+      })
+    );
 
-    const updated = [...newItems, ...rough];
+    const updated = [...newItems, ...roughRef.current];
+    const nextLog = [...newLogs, ...activityLogRef.current];
+
+    roughRef.current = updated;
+    activityLogRef.current = nextLog;
+
     setRough(updated);
-    persist(routines, habits, projects, learning, phases, seasons, updated);
+    setActivityLog(nextLog);
+    persist({ rough: updated, activityLog: nextLog });
   };
 
   const updateRough = (id: string, updates: Partial<RoughItem>) => {
@@ -1413,6 +1757,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setIsExcelModalOpen,
       isSearchOpen,
       setIsSearchOpen,
+      isSyncCodeModalOpen,
+      setIsSyncCodeModalOpen,
       activityLog,
       logActivity,
       exportToExcel,
@@ -1499,6 +1845,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       isSettingsOpen,
       isExcelModalOpen,
       isSearchOpen,
+      isSyncCodeModalOpen,
       activityLog,
       routines,
       habits,

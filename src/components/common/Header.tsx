@@ -20,6 +20,7 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMenu }) => {
     setIsSettingsOpen,
     isMinimalMode,
     setIsSearchOpen,
+    setIsSyncCodeModalOpen,
   } = useApp();
   const identity = SCREEN_IDENTITIES[currentTab] || SCREEN_IDENTITIES.home;
   const currentIndex = TAB_ORDER.indexOf(currentTab);
@@ -61,10 +62,10 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMenu }) => {
             <button
               onClick={() => {
                 triggerHaptic('selection');
-                setIsSettingsOpen(true);
+                setIsSyncCodeModalOpen(true);
               }}
               className="px-2 py-0.5 rounded-md bg-white/[0.06] hover:bg-white/[0.1] active:scale-95 text-zinc-300 hover:text-white font-mono text-[11px] font-semibold transition cursor-pointer flex items-center gap-1"
-              title={`Sync Code #${syncPin} - Tap to change code`}
+              title={`Sync Code #${syncPin} - Tap to change / switch code`}
             >
               <span className="text-[#0a84ff]">#</span>
               <span>{syncPin}</span>
@@ -188,10 +189,10 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMenu }) => {
           <button
             onClick={() => {
               triggerHaptic('selection');
-              setIsSettingsOpen(true);
+              setIsSyncCodeModalOpen(true);
             }}
             className="h-7 sm:h-8 px-2 sm:px-2.5 rounded-lg bg-white/[0.05] hover:bg-white/[0.09] active:scale-95 border border-white/[0.08] flex items-center gap-1.5 text-zinc-200 transition cursor-pointer font-mono"
-            title={`Your unique sync code is #${syncPin}. Enter this code on any tab/device to load your data. Click to change.`}
+            title={`Your unique sync code is #${syncPin}. Click to change or switch user code.`}
           >
             <KeyRound className="w-3 h-3 text-[#0a84ff]" />
             <span className="text-xs font-semibold tracking-wider">#{syncPin}</span>

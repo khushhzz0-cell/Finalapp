@@ -197,6 +197,7 @@ export interface DatabaseDump {
   exportedAt: string;
   ownerPin?: string;
   lastSyncedAt?: string;
+  sourceTabId?: string;
   routines: RoutineItem[];
   habits: HabitItem[];
   projects: ProjectItem[];

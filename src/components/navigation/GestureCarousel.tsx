@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { NavigationTab } from '../../types';
 import { TAB_ORDER, SCREEN_IDENTITIES } from '../../utils/screenIdentities';
@@ -31,6 +31,8 @@ export const GestureCarousel: React.FC<GestureCarouselProps> = ({
   const [isAnimatingTransition, setIsAnimatingTransition] = useState<boolean>(false);
 
   // Gesture tracking refs
+  const isDraggingRef = useRef<boolean>(false);
+  const isAnimatingRef = useRef<boolean>(false);
   const startXRef = useRef<number>(0);
   const startYRef = useRef<number>(0);
   const currentXRef = useRef<number>(0);
@@ -39,20 +41,45 @@ export const GestureCarousel: React.FC<GestureCarouselProps> = ({
   const isLeftEdgeSwipeRef = useRef<boolean>(false);
   const rafIdRef = useRef<number | null>(null);
   const transitionTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const watchdogTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Guarantee drag state is cleanly reset when tab changes externally
+  // Sync refs with state
+  isDraggingRef.current = isDragging;
+  isAnimatingRef.current = isAnimatingTransition;
+
+  // Watchdog: Guarantee isAnimatingTransition NEVER stays true longer than 350ms
   useEffect(() => {
-    if (!isAnimatingTransition) {
-      setDragOffsetPx(0);
-      setIsDragging(false);
-      onDragProgress?.(0);
+    if (isAnimatingTransition) {
+      if (watchdogTimerRef.current) clearTimeout(watchdogTimerRef.current);
+      watchdogTimerRef.current = setTimeout(() => {
+        setIsAnimatingTransition(false);
+        setDragOffsetPx(0);
+        onDragProgress?.(0);
+      }, 360);
+    } else {
+      if (watchdogTimerRef.current) {
+        clearTimeout(watchdogTimerRef.current);
+        watchdogTimerRef.current = null;
+      }
     }
-  }, [currentTab, onDragProgress, isAnimatingTransition]);
+  }, [isAnimatingTransition, onDragProgress]);
 
-  // Window-level safety reset
+  // Clean reset when currentTab changes
+  useEffect(() => {
+    if (transitionTimerRef.current) {
+      clearTimeout(transitionTimerRef.current);
+      transitionTimerRef.current = null;
+    }
+    setDragOffsetPx(0);
+    setIsDragging(false);
+    setIsAnimatingTransition(false);
+    onDragProgress?.(0);
+  }, [currentTab, onDragProgress]);
+
+  // Window-level safety release listener (registered ONCE on mount)
   useEffect(() => {
     const handleGlobalRelease = () => {
-      if (isDragging) {
+      if (isDraggingRef.current) {
         setIsDragging(false);
         setDragOffsetPx(0);
         onDragProgress?.(0);
@@ -71,12 +98,21 @@ export const GestureCarousel: React.FC<GestureCarouselProps> = ({
       window.removeEventListener('pointercancel', handleGlobalRelease);
       if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current);
       if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+      if (watchdogTimerRef.current) clearTimeout(watchdogTimerRef.current);
     };
-  }, [isDragging, onDragProgress]);
+  }, [onDragProgress]);
 
-  // Touch handlers on container
+  // Touch handlers
   const handleTouchStart = (e: React.TouchEvent) => {
-    if (isAnimatingTransition) return;
+    // If a transition was ongoing, resolve it immediately instead of blocking touches
+    if (isAnimatingRef.current || transitionTimerRef.current) {
+      if (transitionTimerRef.current) {
+        clearTimeout(transitionTimerRef.current);
+        transitionTimerRef.current = null;
+      }
+      setIsAnimatingTransition(false);
+      setDragOffsetPx(0);
+    }
 
     const touch = e.touches[0];
     startXRef.current = touch.clientX;
@@ -90,8 +126,6 @@ export const GestureCarousel: React.FC<GestureCarouselProps> = ({
   };
 
   const handleTouchMove = (e: React.TouchEvent) => {
-    if (isAnimatingTransition) return;
-
     const touch = e.touches[0];
     const deltaX = touch.clientX - startXRef.current;
     const deltaY = touch.clientY - startYRef.current;
@@ -111,19 +145,18 @@ export const GestureCarousel: React.FC<GestureCarouselProps> = ({
     if (isHorizontalGestureRef.current) {
       currentXRef.current = touch.clientX;
 
-      // Batch touchmove with requestAnimationFrame for ultra-smooth 60/120fps
       if (!rafIdRef.current) {
         rafIdRef.current = requestAnimationFrame(() => {
           rafIdRef.current = null;
           const currentDeltaX = currentXRef.current - startXRef.current;
 
-          // Calculate resistance at boundary edges
+          // Resistance at boundary edges
           let effectiveDelta = currentDeltaX;
           if (
             (currentIndex === 0 && currentDeltaX > 0) ||
             (currentIndex === TAB_ORDER.length - 1 && currentDeltaX < 0)
           ) {
-            effectiveDelta = currentDeltaX * 0.22; // Natural rubber-band damping
+            effectiveDelta = currentDeltaX * 0.22;
           }
 
           setDragOffsetPx(effectiveDelta);
@@ -143,7 +176,7 @@ export const GestureCarousel: React.FC<GestureCarouselProps> = ({
       rafIdRef.current = null;
     }
 
-    if (!isHorizontalGestureRef.current || isAnimatingTransition) {
+    if (!isHorizontalGestureRef.current) {
       setDragOffsetPx(0);
       setIsDragging(false);
       onDragProgress?.(0);
@@ -155,7 +188,7 @@ export const GestureCarousel: React.FC<GestureCarouselProps> = ({
     const velocityX = deltaX / Math.max(deltaTime, 1);
     const width = containerRef.current?.clientWidth || window.innerWidth;
 
-    // 1. Check for swipe-right-to-reveal menu
+    // 1. Swipe-right-to-reveal menu
     if (
       (isLeftEdgeSwipeRef.current && deltaX > 45) ||
       (currentIndex === 0 && deltaX > 75 && velocityX > 0.2)
@@ -186,7 +219,7 @@ export const GestureCarousel: React.FC<GestureCarouselProps> = ({
     setIsDragging(false);
 
     if (nextIndex !== currentIndex) {
-      // Smooth momentum glide: glide to target edge first!
+      // Smooth momentum glide to target edge
       setIsAnimatingTransition(true);
       triggerHaptic('selection');
       const targetOffset = nextIndex > currentIndex ? -width : width;
@@ -194,11 +227,12 @@ export const GestureCarousel: React.FC<GestureCarouselProps> = ({
 
       if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
       transitionTimerRef.current = setTimeout(() => {
+        transitionTimerRef.current = null;
         setCurrentTab(TAB_ORDER[nextIndex]);
         setDragOffsetPx(0);
         setIsAnimatingTransition(false);
         onDragProgress?.(0);
-      }, 320);
+      }, 300);
     } else {
       // Snap back to 0 smoothly
       setDragOffsetPx(0);
@@ -210,6 +244,10 @@ export const GestureCarousel: React.FC<GestureCarouselProps> = ({
     if (rafIdRef.current) {
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
+    }
+    if (transitionTimerRef.current) {
+      clearTimeout(transitionTimerRef.current);
+      transitionTimerRef.current = null;
     }
     setDragOffsetPx(0);
     setIsDragging(false);
@@ -263,9 +301,10 @@ export const GestureCarousel: React.FC<GestureCarouselProps> = ({
               transform: `translate3d(calc(${offset * 100}% + ${dragOffsetPx}px), 0, 0)`,
               transition: isDragging
                 ? 'none'
-                : 'transform 320ms cubic-bezier(0.22, 1, 0.36, 1)',
+                : 'transform 300ms cubic-bezier(0.22, 1, 0.36, 1)',
               visibility: isVisible ? 'visible' : 'hidden',
-              pointerEvents: isCurrent && !isDragging && !isAnimatingTransition ? 'auto' : 'none',
+              // NEVER disable pointer events on the current screen when not actively dragging
+              pointerEvents: isCurrent && !isDragging ? 'auto' : 'none',
               willChange: isVisible ? 'transform' : 'auto',
               backgroundImage: identity.ambientGlow,
               backgroundAttachment: 'local',

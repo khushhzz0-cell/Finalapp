@@ -374,14 +374,59 @@ export const SEED_REMINDERS: ReminderItem[] = [
 // In-memory or indexedDB persistent store
 class StorageEngine {
   private memoryCache: DatabaseDump | null = null;
+  private currentPin: string = '1000';
 
-  async init(): Promise<DatabaseDump> {
-    if (this.memoryCache) return this.memoryCache;
+  getActivePin(): string {
+    try {
+      return localStorage.getItem('focusdo_active_user_code') || '1000';
+    } catch {
+      return '1000';
+    }
+  }
+
+  setActivePin(pin: string): void {
+    const clean = pin.replace(/\D/g, '').slice(0, 4) || '1000';
+    this.currentPin = clean;
+    try {
+      localStorage.setItem('focusdo_active_user_code', clean);
+    } catch {}
+  }
+
+  getStorageKey(pin = this.currentPin): string {
+    const clean = pin.replace(/\D/g, '').slice(0, 4) || '1000';
+    return `focusdo_pin_workspace_${clean}`;
+  }
+
+  hasLocalDataForPin(pin: string): boolean {
+    try {
+      return !!localStorage.getItem(this.getStorageKey(pin));
+    } catch {
+      return false;
+    }
+  }
+
+  async init(pin?: string): Promise<DatabaseDump> {
+    if (pin) {
+      this.currentPin = pin.replace(/\D/g, '').slice(0, 4) || '1000';
+    } else {
+      this.currentPin = this.getActivePin();
+    }
+
+    const pinKey = this.getStorageKey(this.currentPin);
 
     try {
-      const raw = localStorage.getItem(STORAGE_BACKUP_KEY);
+      // 1. Try PIN-specific key
+      let raw = localStorage.getItem(pinKey);
+
+      // 2. If no PIN-specific key, check legacy global key for migration
+      if (!raw) {
+        raw = localStorage.getItem(STORAGE_BACKUP_KEY);
+      }
+
       if (raw) {
         const parsed = JSON.parse(raw) as DatabaseDump;
+        parsed.ownerPin = this.currentPin;
+
         if (parsed.projects) {
           parsed.projects = parsed.projects.map(p => ({
             ...p,
@@ -397,31 +442,8 @@ class StorageEngine {
           }));
         }
 
-        // Frequency indicators sample routines migration
-        const frequencyMigrationKey = 'focusdo_routines_examples_v2';
-        if (!localStorage.getItem(frequencyMigrationKey)) {
-          if (parsed.routines) {
-            const existingIds = new Set(parsed.routines.map(r => r.id));
-            const newSamples = SEED_ROUTINES.filter(r => !existingIds.has(r.id));
-            if (newSamples.length > 0) {
-              parsed.routines = [...parsed.routines, ...newSamples];
-            }
-          }
-          localStorage.setItem(frequencyMigrationKey, 'true');
-          this.save(parsed);
-        }
-
-        // Lockscreen removal migration: disable passcode lockscreen until user explicitly re-enables it
-        const lockRemovalKey = 'focusdo_lockscreen_disabled_v1';
-        if (!localStorage.getItem(lockRemovalKey)) {
-          if (parsed.settings) {
-            parsed.settings.isPinEnabled = false;
-          }
-          localStorage.setItem(lockRemovalKey, 'true');
-          this.save(parsed);
-        }
-
         this.memoryCache = parsed;
+        this.save(parsed, this.currentPin);
         return parsed;
       }
     } catch {
@@ -431,6 +453,7 @@ class StorageEngine {
     const initialDump: DatabaseDump = {
       version: 1,
       exportedAt: new Date().toISOString(),
+      ownerPin: this.currentPin,
       routines: SEED_ROUTINES,
       habits: SEED_HABITS,
       projects: SEED_PROJECTS,
@@ -442,23 +465,29 @@ class StorageEngine {
       settings: DEFAULT_SETTINGS,
     };
 
-    this.save(initialDump);
+    this.save(initialDump, this.currentPin);
     return initialDump;
   }
 
-  save(data: DatabaseDump): void {
+  save(data: DatabaseDump, pin?: string): void {
+    const targetPin = pin ? pin.replace(/\D/g, '').slice(0, 4) : this.currentPin;
     this.memoryCache = data;
     try {
+      const pinKey = this.getStorageKey(targetPin);
+      localStorage.setItem(pinKey, JSON.stringify(data));
+      // Also maintain legacy backup for backward compatibility
       localStorage.setItem(STORAGE_BACKUP_KEY, JSON.stringify(data));
     } catch (e) {
       console.warn('Failed to write to localStorage', e);
     }
   }
 
-  reset(): DatabaseDump {
+  reset(pin?: string): DatabaseDump {
+    const targetPin = pin ? pin.replace(/\D/g, '').slice(0, 4) : this.currentPin;
     const fresh: DatabaseDump = {
       version: 1,
       exportedAt: new Date().toISOString(),
+      ownerPin: targetPin,
       routines: SEED_ROUTINES,
       habits: SEED_HABITS,
       projects: SEED_PROJECTS,
@@ -469,14 +498,16 @@ class StorageEngine {
       reminders: SEED_REMINDERS,
       settings: DEFAULT_SETTINGS,
     };
-    this.save(fresh);
+    this.save(fresh, targetPin);
     return fresh;
   }
 
-  clearAll(): DatabaseDump {
+  clearAll(pin?: string): DatabaseDump {
+    const targetPin = pin ? pin.replace(/\D/g, '').slice(0, 4) : this.currentPin;
     const empty: DatabaseDump = {
       version: 1,
       exportedAt: new Date().toISOString(),
+      ownerPin: targetPin,
       routines: [],
       habits: [],
       projects: [],
@@ -487,7 +518,7 @@ class StorageEngine {
       reminders: [],
       settings: DEFAULT_SETTINGS,
     };
-    this.save(empty);
+    this.save(empty, targetPin);
     return empty;
   }
 }
