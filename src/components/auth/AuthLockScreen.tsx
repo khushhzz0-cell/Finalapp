@@ -89,7 +89,7 @@ export const AuthLockScreen: React.FC = () => {
 
         {isError && (
           <p className="text-xs text-[#ff3b30] mt-3 font-medium">
-            Incorrect passcode. Default is 1234.
+            Incorrect passcode. Enter your 4-digit workspace PIN or 1234.
           </p>
         )}
       </div>
@@ -148,7 +148,7 @@ export const AuthLockScreen: React.FC = () => {
 
         <div className="text-center pt-3">
           <p className="text-[11px] text-[#8e8e93]">
-            Default passcode: <span className="text-white font-medium">1234</span>
+            Passcode: <span className="text-white font-medium">Workspace PIN</span> or <span className="text-white font-medium">1234</span>
           </p>
         </div>
       </div>

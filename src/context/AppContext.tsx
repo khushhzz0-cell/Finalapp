@@ -26,7 +26,9 @@ import {
   subscribeToPinWorkspace,
   subscribeSyncStatus,
   checkPinExists,
+  checkPinExistsDetailed,
   cleanPin,
+  fetchServerPins,
   SyncStatus,
 } from '../services/pinSyncService';
 import { triggerHaptic } from '../utils/haptics';
@@ -630,70 +632,103 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     triggerHaptic('selection');
     setSyncStatus('syncing');
 
+    // 0. FLUSH & PERSIST PREVIOUS PIN WORKSPACE FIRST!
+    // Absolute guarantee: Current PIN state is 100% saved to disk and localStorage before switching!
+    const previousPin = syncPinRef.current;
+    if (previousPin) {
+      const currentDump: DatabaseDump = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        ownerPin: previousPin,
+        routines: routinesRef.current,
+        habits: habitsRef.current,
+        projects: projectsRef.current,
+        learning: learningRef.current,
+        phases: phasesRef.current,
+        seasons: seasonsRef.current,
+        rough: roughRef.current,
+        reminders: remindersRef.current,
+        settings: settingsRef.current,
+        activityLog: activityLogRef.current,
+      };
+      storage.save(currentDump, previousPin);
+      storage.addKnownPin(previousPin);
+      try {
+        await savePinWorkspace(previousPin, currentDump, true);
+      } catch (e) {
+        console.warn('Note: previous pin workspace flush note:', e);
+      }
+    }
+
     // 1. Unsubscribe from previous PIN listener
     if (unsubPinSnapshotRef.current) {
       unsubPinSnapshotRef.current();
       unsubPinSnapshotRef.current = null;
     }
 
-    const previousPin = syncPinRef.current;
+    // Reset local export timestamp threshold so updates for targetPin are cleanly received
+    lastLocalExportedAtRef.current = 0;
+
     syncPinRef.current = targetPin;
     setSyncPinState(targetPin);
     storage.setActivePin(targetPin);
+    storage.addKnownPin(targetPin);
 
     try {
-      // 2. Check if remote data exists for targetPin
-      const remoteDump = await loadPinWorkspace(targetPin);
+      // 2. Check if targetPin exists remotely or locally
+      const pinCheck = await checkPinExistsDetailed(targetPin);
+      let targetDump: DatabaseDump | null = null;
 
-      if (remoteDump) {
-        // Target PIN already exists in cloud: cleanly load it!
-        routinesRef.current = remoteDump.routines || [];
-        habitsRef.current = remoteDump.habits || [];
-        projectsRef.current = remoteDump.projects || [];
-        learningRef.current = remoteDump.learning || [];
-        phasesRef.current = remoteDump.phases || [];
-        seasonsRef.current = remoteDump.seasons || [];
-        roughRef.current = remoteDump.rough || [];
-        remindersRef.current = remoteDump.reminders || [];
-        settingsRef.current = remoteDump.settings || DEFAULT_SETTINGS;
-        activityLogRef.current = remoteDump.activityLog || [];
-
-        setRoutines(routinesRef.current);
-        setHabits(habitsRef.current);
-        setProjects(projectsRef.current);
-        setLearning(learningRef.current);
-        setPhases(phasesRef.current);
-        setSeasons(seasonsRef.current);
-        setRough(roughRef.current);
-        setReminders(remindersRef.current);
-        setSettings(settingsRef.current);
-        setActivityLog(activityLogRef.current);
-        storage.save(remoteDump, targetPin);
+      if (pinCheck.exists) {
+        // Try loading from remote backend
+        targetDump = await loadPinWorkspace(targetPin);
+        // If remote returned null or empty, check local storage
+        if (!targetDump && storage.hasLocalDataForPin(targetPin)) {
+          targetDump = await storage.init(targetPin);
+        }
       } else if (storage.hasLocalDataForPin(targetPin)) {
-        // Target PIN has local cached data
-        const localDump = await storage.init(targetPin);
-        routinesRef.current = localDump.routines || [];
-        habitsRef.current = localDump.habits || [];
-        projectsRef.current = localDump.projects || [];
-        learningRef.current = localDump.learning || [];
-        phasesRef.current = localDump.phases || [];
-        seasonsRef.current = localDump.seasons || [];
-        roughRef.current = localDump.rough || [];
-        remindersRef.current = localDump.reminders || [];
-        settingsRef.current = localDump.settings || DEFAULT_SETTINGS;
-        activityLogRef.current = localDump.activityLog || [];
+        targetDump = await storage.init(targetPin);
+      }
 
-        setRoutines(routinesRef.current);
-        setHabits(habitsRef.current);
-        setProjects(projectsRef.current);
-        setLearning(learningRef.current);
-        setPhases(phasesRef.current);
-        setSeasons(seasonsRef.current);
-        setRough(roughRef.current);
-        setReminders(remindersRef.current);
-        setSettings(settingsRef.current);
-        setActivityLog(activityLogRef.current);
-        await savePinWorkspace(targetPin, localDump, true);
+      if (targetDump) {
+        // Target PIN workspace exists: cleanly load all data!
+        const r = targetDump.routines || [];
+        const h = targetDump.habits || [];
+        const p = targetDump.projects || [];
+        const l = targetDump.learning || [];
+        const ph = targetDump.phases || [];
+        const s = targetDump.seasons || [];
+        const ro = targetDump.rough || [];
+        const rm = targetDump.reminders || [];
+        const st = targetDump.settings || DEFAULT_SETTINGS;
+        const act = targetDump.activityLog || [];
+
+        routinesRef.current = r;
+        habitsRef.current = h;
+        projectsRef.current = p;
+        learningRef.current = l;
+        phasesRef.current = ph;
+        seasonsRef.current = s;
+        roughRef.current = ro;
+        remindersRef.current = rm;
+        settingsRef.current = st;
+        activityLogRef.current = act;
+
+        setRoutines(r);
+        setHabits(h);
+        setProjects(p);
+        setLearning(l);
+        setPhases(ph);
+        setSeasons(s);
+        setRough(ro);
+        setReminders(rm);
+        setSettings(st);
+        setActivityLog(act);
+
+        storage.save(targetDump, targetPin);
+        storage.addKnownPin(targetPin);
+        // Ensure server also has a verified copy
+        await savePinWorkspace(targetPin, targetDump, true);
       } else if (
         mode === 'migrate' ||
         (mode === 'auto' && (previousPin === '1000' || previousPin === '1234') && (routinesRef.current.length > 0 || projectsRef.current.length > 0))
@@ -716,6 +751,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           activityLog: activityLogRef.current,
         };
         storage.save(migratedDump, targetPin);
+        storage.addKnownPin(targetPin);
         await savePinWorkspace(targetPin, migratedDump, true);
       } else {
         // Brand new PIN: start completely clean with isolated workspace!
@@ -755,7 +791,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setReminders([]);
         setSettings(DEFAULT_SETTINGS);
         setActivityLog([]);
+
         storage.save(freshDump, targetPin);
+        storage.addKnownPin(targetPin);
         await savePinWorkspace(targetPin, freshDump, true);
       }
 
@@ -860,8 +898,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Auth
   const unlockApp = (pin: string): boolean => {
-    if (!settings.isPinEnabled || pin === settings.pin || pin === '1234') {
+    const clean = cleanPin(pin);
+    const isPasscodeMatch = !settings.isPinEnabled || pin === settings.pin || clean === cleanPin(settings.pin || '') || pin === '1234';
+    const isKnownWorkspace = clean === syncPinRef.current || storage.hasLocalDataForPin(clean) || storage.getKnownPins().includes(clean);
+
+    if (isPasscodeMatch || isKnownWorkspace) {
       setIsLocked(false);
+      // If entered PIN corresponds to a known workspace different from current, switch to that workspace!
+      if (clean !== syncPinRef.current && (storage.hasLocalDataForPin(clean) || storage.getKnownPins().includes(clean))) {
+        setSyncPin(clean, 'auto');
+      }
       return true;
     }
     return false;

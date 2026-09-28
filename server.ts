@@ -75,11 +75,80 @@ app.get('/api/sync/:pin/events', (req: Request, res: Response) => {
   });
 });
 
+// List all existing 4-digit PIN workspaces on server
+app.get('/api/sync/pins', (_req: Request, res: Response) => {
+  try {
+    const files = fs.readdirSync(DATA_DIR);
+    const pinList: Array<{
+      pin: string;
+      projectsCount: number;
+      routinesCount: number;
+      habitsCount: number;
+      lastSyncedAt: string | null;
+    }> = [];
+
+    for (const file of files) {
+      const match = file.match(/^pin_(\d{4})\.json$/);
+      if (match) {
+        const pin = match[1];
+        try {
+          const filePath = path.join(DATA_DIR, file);
+          const stat = fs.statSync(filePath);
+          if (stat.size > 10) {
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const data = JSON.parse(content);
+            pinList.push({
+              pin,
+              projectsCount: Array.isArray(data.projects) ? data.projects.length : 0,
+              routinesCount: Array.isArray(data.routines) ? data.routines.length : 0,
+              habitsCount: Array.isArray(data.habits) ? data.habits.length : 0,
+              lastSyncedAt: data.serverSyncedAt || data.exportedAt || null,
+            });
+          }
+        } catch {
+          // Skip corrupt or unreadable files
+        }
+      }
+    }
+
+    res.json({ pins: pinList });
+  } catch (err: any) {
+    console.error('Failed to list pins:', err);
+    res.status(500).json({ error: 'Failed to list pins', pins: [] });
+  }
+});
+
 // Check if a specific 4-digit PIN workspace exists
 app.get('/api/sync/:pin/check', (req: Request, res: Response) => {
   const pin = req.params.pin.replace(/\D/g, '').slice(0, 4) || '1234';
   const filePath = getFilePathForPin(pin);
-  res.json({ exists: fs.existsSync(filePath), pin });
+  let exists = false;
+  let stats: {
+    projectsCount: number;
+    routinesCount: number;
+    habitsCount: number;
+    lastSyncedAt: string | null;
+  } | null = null;
+
+  if (fs.existsSync(filePath)) {
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const parsed = JSON.parse(content);
+      if (parsed) {
+        exists = true;
+        stats = {
+          projectsCount: Array.isArray(parsed.projects) ? parsed.projects.length : 0,
+          routinesCount: Array.isArray(parsed.routines) ? parsed.routines.length : 0,
+          habitsCount: Array.isArray(parsed.habits) ? parsed.habits.length : 0,
+          lastSyncedAt: parsed.serverSyncedAt || parsed.exportedAt || null,
+        };
+      }
+    } catch {
+      exists = false;
+    }
+  }
+
+  res.json({ exists, pin, stats });
 });
 
 // GET workspace for a specific 4-digit PIN

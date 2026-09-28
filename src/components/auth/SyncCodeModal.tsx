@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useApp } from '../../context/AppContext';
 import {
   KeyRound,
@@ -10,9 +10,16 @@ import {
   Shuffle,
   ShieldCheck,
   AlertCircle,
+  FolderOpen,
 } from 'lucide-react';
 import { triggerHaptic } from '../../utils/haptics';
-import { checkPinExists, cleanPin } from '../../services/pinSyncService';
+import {
+  checkPinExistsDetailed,
+  cleanPin,
+  fetchServerPins,
+  PinDetailedStatus,
+} from '../../services/pinSyncService';
+import { storage } from '../../db/storage';
 
 export const SyncCodeModal: React.FC = () => {
   const {
@@ -27,16 +34,44 @@ export const SyncCodeModal: React.FC = () => {
 
   const [inputCode, setInputCode] = useState(syncPin);
   const [isChecking, setIsChecking] = useState(false);
-  const [codeExists, setCodeExists] = useState<boolean | null>(null);
+  const [pinStatus, setPinStatus] = useState<PinDetailedStatus | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [knownWorkspaces, setKnownWorkspaces] = useState<Array<{
+    pin: string;
+    projectsCount: number;
+    routinesCount: number;
+    habitsCount: number;
+    lastSyncedAt: string | null;
+  }>>([]);
+
+  const refreshKnownList = useCallback(async () => {
+    const serverPins = await fetchServerPins();
+    const localPins = storage.getKnownPins();
+    const combinedPins = Array.from(new Set([...localPins, ...serverPins.map(s => s.pin)]));
+
+    const fullList = combinedPins.map(p => {
+      const serverEntry = serverPins.find(s => s.pin === p);
+      const localEntry = storage.getLocalPinSummary(p);
+      return {
+        pin: p,
+        projectsCount: serverEntry?.projectsCount ?? localEntry?.projectsCount ?? 0,
+        routinesCount: serverEntry?.routinesCount ?? localEntry?.routinesCount ?? 0,
+        habitsCount: serverEntry?.habitsCount ?? localEntry?.habitsCount ?? 0,
+        lastSyncedAt: serverEntry?.lastSyncedAt ?? localEntry?.lastSaved ?? null,
+      };
+    });
+
+    setKnownWorkspaces(fullList);
+  }, []);
 
   useEffect(() => {
     if (isSyncCodeModalOpen) {
       setInputCode(syncPin);
       setActionNotice(null);
-      setCodeExists(null);
+      setPinStatus(null);
+      refreshKnownList();
     }
-  }, [isSyncCodeModalOpen, syncPin]);
+  }, [isSyncCodeModalOpen, syncPin, refreshKnownList]);
 
   // Check code existence on input change
   useEffect(() => {
@@ -44,16 +79,16 @@ export const SyncCodeModal: React.FC = () => {
     if (cleaned.length === 4 && cleaned !== syncPin) {
       setIsChecking(true);
       let isCurrent = true;
-      checkPinExists(cleaned)
-        .then((exists) => {
+      checkPinExistsDetailed(cleaned)
+        .then((status) => {
           if (isCurrent) {
-            setCodeExists(exists);
+            setPinStatus(status);
             setIsChecking(false);
           }
         })
         .catch(() => {
           if (isCurrent) {
-            setCodeExists(null);
+            setPinStatus(null);
             setIsChecking(false);
           }
         });
@@ -61,7 +96,7 @@ export const SyncCodeModal: React.FC = () => {
         isCurrent = false;
       };
     } else {
-      setCodeExists(null);
+      setPinStatus(null);
       setIsChecking(false);
     }
   }, [inputCode, syncPin]);
@@ -74,16 +109,18 @@ export const SyncCodeModal: React.FC = () => {
     setInputCode(random);
   };
 
-  const handleSwitchCode = async (mode: 'auto' | 'migrate' | 'fresh' = 'auto') => {
-    const cleaned = cleanPin(inputCode);
+  const handleSwitchCode = async (targetCode: string, mode: 'auto' | 'migrate' | 'fresh' = 'auto') => {
+    const cleaned = cleanPin(targetCode);
     if (cleaned.length !== 4) return;
 
     triggerHaptic('selection');
+    setActionNotice(`Saving & switching to #${cleaned}...`);
     await setSyncPin(cleaned, mode);
     setActionNotice(`Active user set to #${cleaned}`);
+    await refreshKnownList();
     setTimeout(() => {
       setIsSyncCodeModalOpen(false);
-    }, 900);
+    }, 700);
   };
 
   const isCurrentPin = cleanPin(inputCode) === syncPin;
@@ -91,7 +128,7 @@ export const SyncCodeModal: React.FC = () => {
 
   return (
     <div className="fixed inset-0 z-50 bg-black/65 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200">
-      <div className="bg-[#18181b] border border-white/10 rounded-2xl w-full max-w-md p-5 shadow-2xl space-y-4">
+      <div className="bg-[#18181b] border border-white/10 rounded-2xl w-full max-w-md p-5 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-white/[0.06]">
           <div className="flex items-center gap-2">
@@ -103,7 +140,7 @@ export const SyncCodeModal: React.FC = () => {
                 Unique User Sync Code
               </h3>
               <p className="text-[11px] text-zinc-400">
-                Sync all data to this 4-digit user code
+                Switch workspaces or sync across devices
               </p>
             </div>
           </div>
@@ -147,6 +184,57 @@ export const SyncCodeModal: React.FC = () => {
           </button>
         </div>
 
+        {/* Quick Switch to Known Workspaces */}
+        {knownWorkspaces.length > 1 && (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between px-0.5">
+              <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold flex items-center gap-1">
+                <FolderOpen className="w-3 h-3 text-zinc-400" />
+                Your Workspaces ({knownWorkspaces.length})
+              </span>
+              <span className="text-[10px] text-zinc-500">Tap to switch</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {knownWorkspaces.map(ws => {
+                const isActive = ws.pin === syncPin;
+                return (
+                  <button
+                    key={ws.pin}
+                    type="button"
+                    onClick={() => {
+                      if (!isActive) {
+                        setInputCode(ws.pin);
+                        handleSwitchCode(ws.pin, 'auto');
+                      }
+                    }}
+                    className={`p-2.5 rounded-xl border text-left transition cursor-pointer flex flex-col justify-between ${
+                      isActive
+                        ? 'bg-[#0a84ff]/10 border-[#0a84ff]/40 text-white shadow-sm'
+                        : 'bg-black/30 border-white/[0.06] hover:bg-white/[0.04] text-zinc-300'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono font-bold text-sm tracking-wider">
+                        #{ws.pin}
+                      </span>
+                      {isActive && (
+                        <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-400 font-medium">
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[10px] text-zinc-400 mt-1 flex items-center gap-2">
+                      <span>{ws.projectsCount} proj</span>
+                      <span>•</span>
+                      <span>{ws.routinesCount} rout</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* 4-Digit Input Form */}
         <div className="space-y-2">
           <label className="text-xs font-medium text-zinc-300 block">
@@ -188,14 +276,14 @@ export const SyncCodeModal: React.FC = () => {
                   <RefreshCw className="w-3 h-3 animate-spin text-[#0a84ff]" />
                   <span>Checking code #{inputCode}...</span>
                 </div>
-              ) : codeExists ? (
+              ) : pinStatus?.exists ? (
                 <div className="space-y-1">
                   <div className="flex items-center gap-1.5 text-emerald-400 font-medium text-[11px]">
                     <CheckCircle2 className="w-3.5 h-3.5" />
                     <span>Existing workspace found for #{inputCode}!</span>
                   </div>
                   <p className="text-[11px] text-zinc-400">
-                    Switching will load all data saved under #{inputCode}.
+                    Contains {pinStatus.projectsCount} projects and {pinStatus.routinesCount} routines. Switching will restore all saved data.
                   </p>
                 </div>
               ) : (
@@ -222,18 +310,18 @@ export const SyncCodeModal: React.FC = () => {
 
         {/* Action Buttons */}
         <div className="space-y-2 pt-1">
-          {isValidLength && !isCurrentPin && !codeExists && !isChecking ? (
+          {isValidLength && !isCurrentPin && !pinStatus?.exists && !isChecking ? (
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
-                onClick={() => handleSwitchCode('migrate')}
+                onClick={() => handleSwitchCode(inputCode, 'migrate')}
                 className="w-full py-2.5 px-3 rounded-xl bg-[#0a84ff] hover:bg-[#0071e3] active:scale-95 text-white text-xs font-semibold transition cursor-pointer text-center"
               >
                 Sync Current Data to #{inputCode}
               </button>
               <button
                 type="button"
-                onClick={() => handleSwitchCode('fresh')}
+                onClick={() => handleSwitchCode(inputCode, 'fresh')}
                 className="w-full py-2.5 px-3 rounded-xl bg-white/[0.08] hover:bg-white/[0.12] active:scale-95 text-zinc-200 text-xs font-semibold transition cursor-pointer text-center"
               >
                 Start Fresh Empty #{inputCode}
@@ -242,8 +330,8 @@ export const SyncCodeModal: React.FC = () => {
           ) : (
             <button
               type="button"
-              disabled={!isValidLength || isCurrentPin}
-              onClick={() => handleSwitchCode('auto')}
+              disabled={!isValidLength || isCurrentPin || isChecking}
+              onClick={() => handleSwitchCode(inputCode, 'auto')}
               className="w-full py-2.5 px-4 rounded-xl bg-[#0a84ff] hover:bg-[#0071e3] active:scale-95 disabled:opacity-40 disabled:pointer-events-none text-white text-xs font-semibold transition cursor-pointer flex items-center justify-center gap-1.5"
             >
               <span>{isCurrentPin ? 'Current Active Code' : `Switch to Code #${inputCode}`}</span>
@@ -263,7 +351,7 @@ export const SyncCodeModal: React.FC = () => {
             <br />
             • Enter this same code on another phone, computer, or browser tab to load your synced data.
             <br />
-            • Two different codes never mix data.
+            • Two different codes never mix data. Switching always saves your active work first.
           </p>
         </div>
       </div>

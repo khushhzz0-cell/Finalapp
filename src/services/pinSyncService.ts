@@ -1,4 +1,5 @@
 import { DatabaseDump } from '../types';
+import { storage } from '../db/storage';
 
 export type SyncStatus = 'connected' | 'syncing' | 'synced' | 'offline' | 'error';
 
@@ -54,21 +55,104 @@ export async function testServerConnection(): Promise<boolean> {
   }
 }
 
+export interface PinDetailedStatus {
+  exists: boolean;
+  pin: string;
+  source: 'cloud' | 'local' | 'both' | 'none';
+  projectsCount: number;
+  routinesCount: number;
+  habitsCount: number;
+  lastSyncedAt: string | null;
+}
+
 /**
- * Check whether a PIN workspace already exists on server
+ * Fetch all existing PIN workspaces known by the server
  */
-export async function checkPinExists(pin: string): Promise<boolean> {
+export async function fetchServerPins(): Promise<Array<{
+  pin: string;
+  projectsCount: number;
+  routinesCount: number;
+  habitsCount: number;
+  lastSyncedAt: string | null;
+}>> {
+  try {
+    const res = await fetch('/api/sync/pins', { cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.pins)) {
+        // Register each into local storage known pins
+        data.pins.forEach((p: any) => {
+          if (p && p.pin) {
+            storage.addKnownPin(p.pin);
+          }
+        });
+        return data.pins;
+      }
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Detailed existence check combining local cache and server backend
+ */
+export async function checkPinExistsDetailed(pin: string): Promise<PinDetailedStatus> {
   const code = cleanPin(pin);
+  const localSummary = storage.getLocalPinSummary(code);
+  const hasLocal = storage.hasLocalDataForPin(code);
+
+  let cloudExists = false;
+  let cloudStats: any = null;
+
   try {
     const res = await fetch(`/api/sync/${code}/check`, { cache: 'no-store' });
     if (res.ok) {
       const json = await res.json();
-      return !!json.exists;
+      cloudExists = !!json.exists;
+      cloudStats = json.stats;
     }
-    return false;
   } catch {
-    return false;
+    cloudExists = false;
   }
+
+  const exists = hasLocal || cloudExists;
+  let source: 'cloud' | 'local' | 'both' | 'none' = 'none';
+  if (hasLocal && cloudExists) source = 'both';
+  else if (cloudExists) source = 'cloud';
+  else if (hasLocal) source = 'local';
+
+  const projectsCount = cloudStats?.projectsCount ?? localSummary?.projectsCount ?? 0;
+  const routinesCount = cloudStats?.routinesCount ?? localSummary?.routinesCount ?? 0;
+  const habitsCount = cloudStats?.habitsCount ?? localSummary?.habitsCount ?? 0;
+  const lastSyncedAt = cloudStats?.lastSyncedAt ?? localSummary?.lastSaved ?? null;
+
+  if (exists) {
+    storage.addKnownPin(code);
+  }
+
+  return {
+    exists,
+    pin: code,
+    source,
+    projectsCount,
+    routinesCount,
+    habitsCount,
+    lastSyncedAt,
+  };
+}
+
+/**
+ * Check whether a PIN workspace exists (in local cache or on cloud server)
+ */
+export async function checkPinExists(pin: string): Promise<boolean> {
+  const code = cleanPin(pin);
+  if (storage.hasLocalDataForPin(code)) {
+    return true;
+  }
+  const detailed = await checkPinExistsDetailed(code);
+  return detailed.exists;
 }
 
 /**
@@ -91,6 +175,7 @@ export async function loadPinWorkspace(pin: string): Promise<DatabaseDump | null
     const payload = await res.json();
     if (payload && payload.exists && payload.data) {
       setSyncStatus('synced');
+      storage.addKnownPin(code);
       return payload.data as DatabaseDump;
     }
 
@@ -116,29 +201,35 @@ export function getTabId(): string {
   return (window as any).__focusdo_tab_id;
 }
 
-let saveDebounceTimer: NodeJS.Timeout | null = null;
-let pendingResolvers: Array<() => void> = [];
-let pendingRejectors: Array<(err: any) => void> = [];
-let pendingSaveDump: DatabaseDump | null = null;
-let pendingSavePin: string | null = null;
-let isSaveInFlight = false;
+// Per-PIN pending save queues so switching PINs NEVER clobbers or destroys another PIN's pending writes
+interface PendingPinEntry {
+  pin: string;
+  data: DatabaseDump;
+  timer: any;
+  resolvers: Array<() => void>;
+  rejectors: Array<(err: any) => void>;
+  inFlight: boolean;
+}
 
-async function flushSaveQueue(): Promise<void> {
-  if (isSaveInFlight || !pendingSaveDump || !pendingSavePin) {
-    return;
+const pinQueues = new Map<string, PendingPinEntry>();
+
+async function executePinWrite(pin: string): Promise<void> {
+  const entry = pinQueues.get(pin);
+  if (!entry || entry.inFlight) return;
+
+  entry.inFlight = true;
+  if (entry.timer) {
+    clearTimeout(entry.timer);
+    entry.timer = null;
   }
 
-  isSaveInFlight = true;
-  const code = pendingSavePin;
-  const data = pendingSaveDump;
-  const resolvers = [...pendingResolvers];
-  const rejectors = [...pendingRejectors];
+  const data = entry.data;
+  const resolvers = [...entry.resolvers];
+  const rejectors = [...entry.rejectors];
 
-  // Reset queue before calling so new incoming saves can queue up
-  pendingSaveDump = null;
-  pendingSavePin = null;
-  pendingResolvers = [];
-  pendingRejectors = [];
+  // Reset entry queue so subsequent incoming edits for this pin can queue freshly
+  entry.resolvers = [];
+  entry.rejectors = [];
 
   setSyncStatus('syncing');
 
@@ -146,12 +237,12 @@ async function flushSaveQueue(): Promise<void> {
     const tabId = getTabId();
     const payload: DatabaseDump = {
       ...data,
-      ownerPin: code,
+      ownerPin: pin,
       sourceTabId: tabId,
       lastSyncedAt: new Date().toISOString(),
     };
 
-    const res = await fetch(`/api/sync/${code}`, {
+    const res = await fetch(`/api/sync/${pin}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -164,13 +255,16 @@ async function flushSaveQueue(): Promise<void> {
       throw new Error(`Server returned ${res.status}`);
     }
 
+    // Register pin locally
+    storage.addKnownPin(pin);
+
     // Broadcast to local tabs on the same browser for zero-delay synchronization
     try {
       if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-        const channel = new BroadcastChannel(`focusdo_sync_${code}`);
+        const channel = new BroadcastChannel(`focusdo_sync_${pin}`);
         channel.postMessage({
           type: 'update',
-          pin: code,
+          pin,
           data: payload,
           sourceTabId: tabId,
         });
@@ -181,7 +275,7 @@ async function flushSaveQueue(): Promise<void> {
     setSyncStatus('synced');
     resolvers.forEach(r => r());
   } catch (error) {
-    console.warn(`Failed to save workspace for PIN ${code}:`, error);
+    console.warn(`Failed to save workspace for PIN ${pin}:`, error);
     if (!navigator.onLine) {
       setSyncStatus('offline');
     } else {
@@ -189,16 +283,37 @@ async function flushSaveQueue(): Promise<void> {
     }
     rejectors.forEach(rej => rej(error));
   } finally {
-    isSaveInFlight = false;
-    // If a new save was queued while this one was in flight, flush it now
-    if (pendingSaveDump && pendingSavePin) {
-      flushSaveQueue();
+    entry.inFlight = false;
+    // If more items accumulated while in flight, re-flush
+    if (entry.resolvers.length > 0) {
+      executePinWrite(pin);
+    } else {
+      pinQueues.delete(pin);
     }
   }
 }
 
 /**
- * Save workspace by 4-digit code with robust debouncing & anti-collision queue
+ * Flush any pending queued write for a specific PIN immediately
+ */
+export async function flushPinSave(pin: string): Promise<void> {
+  const code = cleanPin(pin);
+  const entry = pinQueues.get(code);
+  if (entry) {
+    await executePinWrite(code);
+  }
+}
+
+/**
+ * Flush all pending queued writes across all PINs immediately
+ */
+export async function flushAllPendingSaves(): Promise<void> {
+  const pins = Array.from(pinQueues.keys());
+  await Promise.all(pins.map(pin => executePinWrite(pin)));
+}
+
+/**
+ * Save workspace by 4-digit code with per-PIN isolation and anti-collision guarantee
  */
 export function savePinWorkspace(
   pin: string,
@@ -208,22 +323,37 @@ export function savePinWorkspace(
   const code = cleanPin(pin);
 
   return new Promise((resolve, reject) => {
-    pendingSavePin = code;
-    pendingSaveDump = data;
-    pendingResolvers.push(resolve);
-    pendingRejectors.push(reject);
+    let entry = pinQueues.get(code);
+    if (!entry) {
+      entry = {
+        pin: code,
+        data,
+        timer: null,
+        resolvers: [],
+        rejectors: [],
+        inFlight: false,
+      };
+      pinQueues.set(code, entry);
+    } else {
+      entry.data = data;
+    }
 
-    if (saveDebounceTimer) {
-      clearTimeout(saveDebounceTimer);
-      saveDebounceTimer = null;
+    entry.resolvers.push(resolve);
+    entry.rejectors.push(reject);
+
+    if (entry.timer) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
     }
 
     if (immediate) {
-      flushSaveQueue();
+      executePinWrite(code);
     } else {
-      saveDebounceTimer = setTimeout(() => {
-        saveDebounceTimer = null;
-        flushSaveQueue();
+      entry.timer = setTimeout(() => {
+        if (entry) {
+          entry.timer = null;
+        }
+        executePinWrite(code);
       }, 300);
     }
   });

@@ -371,6 +371,8 @@ export const SEED_REMINDERS: ReminderItem[] = [
   },
 ];
 
+const KNOWN_PINS_KEY = 'focusdo_known_user_pins';
+
 // In-memory or indexedDB persistent store
 class StorageEngine {
   private memoryCache: DatabaseDump | null = null;
@@ -378,7 +380,9 @@ class StorageEngine {
 
   getActivePin(): string {
     try {
-      return localStorage.getItem('focusdo_active_user_code') || '1000';
+      const stored = localStorage.getItem('focusdo_active_user_code');
+      const clean = stored ? stored.replace(/\D/g, '').slice(0, 4) : '';
+      return clean.length === 4 ? clean : '1000';
     } catch {
       return '1000';
     }
@@ -389,6 +393,30 @@ class StorageEngine {
     this.currentPin = clean;
     try {
       localStorage.setItem('focusdo_active_user_code', clean);
+      this.addKnownPin(clean);
+    } catch {}
+  }
+
+  getKnownPins(): string[] {
+    try {
+      const raw = localStorage.getItem(KNOWN_PINS_KEY);
+      const parsed: string[] = raw ? JSON.parse(raw) : [];
+      const set = new Set<string>(['1000', this.getActivePin(), ...parsed]);
+      return Array.from(set).filter(p => /^\d{4}$/.test(p));
+    } catch {
+      return ['1000', this.getActivePin()];
+    }
+  }
+
+  addKnownPin(pin: string): void {
+    const clean = pin.replace(/\D/g, '').slice(0, 4);
+    if (clean.length !== 4) return;
+    try {
+      const current = this.getKnownPins();
+      if (!current.includes(clean)) {
+        const next = [...current, clean];
+        localStorage.setItem(KNOWN_PINS_KEY, JSON.stringify(next));
+      }
     } catch {}
   }
 
@@ -398,10 +426,37 @@ class StorageEngine {
   }
 
   hasLocalDataForPin(pin: string): boolean {
+    const clean = pin.replace(/\D/g, '').slice(0, 4) || '1000';
     try {
-      return !!localStorage.getItem(this.getStorageKey(pin));
+      const raw = localStorage.getItem(this.getStorageKey(clean));
+      if (!raw) return false;
+      const parsed = JSON.parse(raw);
+      return !!parsed && (parsed.ownerPin === clean || Array.isArray(parsed.routines) || Array.isArray(parsed.projects));
     } catch {
       return false;
+    }
+  }
+
+  getLocalPinSummary(pin: string): {
+    projectsCount: number;
+    routinesCount: number;
+    habitsCount: number;
+    lastSaved: string | null;
+  } | null {
+    const clean = pin.replace(/\D/g, '').slice(0, 4) || '1000';
+    try {
+      const raw = localStorage.getItem(this.getStorageKey(clean));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed) return null;
+      return {
+        projectsCount: Array.isArray(parsed.projects) ? parsed.projects.length : 0,
+        routinesCount: Array.isArray(parsed.routines) ? parsed.routines.length : 0,
+        habitsCount: Array.isArray(parsed.habits) ? parsed.habits.length : 0,
+        lastSaved: parsed.exportedAt || null,
+      };
+    } catch {
+      return null;
     }
   }
 
@@ -412,14 +467,16 @@ class StorageEngine {
       this.currentPin = this.getActivePin();
     }
 
+    this.addKnownPin(this.currentPin);
     const pinKey = this.getStorageKey(this.currentPin);
 
     try {
       // 1. Try PIN-specific key
       let raw = localStorage.getItem(pinKey);
 
-      // 2. If no PIN-specific key, check legacy global key for migration
-      if (!raw) {
+      // 2. Only if the PIN is the default '1000' or '1234' on initial migration from legacy:
+      // check legacy global key
+      if (!raw && (this.currentPin === '1000' || this.currentPin === '1234')) {
         raw = localStorage.getItem(STORAGE_BACKUP_KEY);
       }
 
@@ -473,10 +530,13 @@ class StorageEngine {
     const targetPin = pin ? pin.replace(/\D/g, '').slice(0, 4) : this.currentPin;
     this.memoryCache = data;
     try {
+      this.addKnownPin(targetPin);
       const pinKey = this.getStorageKey(targetPin);
       localStorage.setItem(pinKey, JSON.stringify(data));
-      // Also maintain legacy backup for backward compatibility
-      localStorage.setItem(STORAGE_BACKUP_KEY, JSON.stringify(data));
+      // Only write to legacy global backup if targetPin is default '1000'
+      if (targetPin === '1000') {
+        localStorage.setItem(STORAGE_BACKUP_KEY, JSON.stringify(data));
+      }
     } catch (e) {
       console.warn('Failed to write to localStorage', e);
     }
