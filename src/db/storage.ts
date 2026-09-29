@@ -380,6 +380,16 @@ class StorageEngine {
 
   getActivePin(): string {
     try {
+      if (typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        const urlPin = params.get('pin') || params.get('code');
+        if (urlPin) {
+          const clean = urlPin.replace(/\D/g, '').slice(0, 4);
+          if (clean.length === 4) return clean;
+        }
+        const hash = window.location.hash.replace(/\D/g, '').slice(0, 4);
+        if (hash.length === 4) return hash;
+      }
       const stored = localStorage.getItem('focusdo_active_user_code');
       const clean = stored ? stored.replace(/\D/g, '').slice(0, 4) : '';
       return clean.length === 4 ? clean : '1000';

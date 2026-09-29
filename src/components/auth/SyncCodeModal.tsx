@@ -334,7 +334,13 @@ export const SyncCodeModal: React.FC = () => {
               onClick={() => handleSwitchCode(inputCode, 'auto')}
               className="w-full py-2.5 px-4 rounded-xl bg-[#0a84ff] hover:bg-[#0071e3] active:scale-95 disabled:opacity-40 disabled:pointer-events-none text-white text-xs font-semibold transition cursor-pointer flex items-center justify-center gap-1.5"
             >
-              <span>{isCurrentPin ? 'Current Active Code' : `Switch to Code #${inputCode}`}</span>
+              <span>
+                {isCurrentPin
+                  ? 'Current Active Code'
+                  : pinStatus?.exists
+                  ? `Restore & Switch to Workspace #${inputCode}`
+                  : `Switch to Code #${inputCode}`}
+              </span>
               {!isCurrentPin && <ArrowRight className="w-3.5 h-3.5" />}
             </button>
           )}

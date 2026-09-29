@@ -8,6 +8,18 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json({ limit: '25mb' }));
 
+// Enable CORS for cross-origin, cross-browser, and cross-tab requests
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, x-tab-id');
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
+
 // Ensure data storage directory exists
 const DATA_DIR = path.resolve(process.cwd(), 'data', 'workspaces');
 if (!fs.existsSync(DATA_DIR)) {

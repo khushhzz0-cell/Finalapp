@@ -51,7 +51,8 @@ interface AppContextType {
 
   // Auth / Privacy
   isLocked: boolean;
-  unlockApp: (pin: string) => boolean;
+  unlockApp: (pin: string, force?: boolean) => boolean;
+  unlockAppAsync: (pin: string) => Promise<boolean>;
   lockApp: () => void;
   settings: AppSettings;
   updateSettings: (partial: Partial<AppSettings>) => void;
@@ -304,6 +305,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setSyncPinState(activePin);
 
     async function initialBoot() {
+      // 0. Immediately pre-fetch all existing server PIN workspaces so they are registered in memory & storage
+      fetchServerPins()
+        .then((serverPins) => {
+          if (Array.isArray(serverPins)) {
+            serverPins.forEach((p) => {
+              if (p && p.pin) {
+                storage.addKnownPin(p.pin);
+              }
+            });
+          }
+        })
+        .catch(() => {});
+
       // 1. Instant local load for active PIN
       const dump = await storage.init(activePin);
       const r = dump.routines || [];
@@ -675,18 +689,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     storage.addKnownPin(targetPin);
 
     try {
-      // 2. Check if targetPin exists remotely or locally
-      const pinCheck = await checkPinExistsDetailed(targetPin);
-      let targetDump: DatabaseDump | null = null;
-
-      if (pinCheck.exists) {
-        // Try loading from remote backend
-        targetDump = await loadPinWorkspace(targetPin);
-        // If remote returned null or empty, check local storage
-        if (!targetDump && storage.hasLocalDataForPin(targetPin)) {
-          targetDump = await storage.init(targetPin);
-        }
-      } else if (storage.hasLocalDataForPin(targetPin)) {
+      // 2. Load targetPin from remote backend or local cache
+      let targetDump = await loadPinWorkspace(targetPin);
+      if (!targetDump && storage.hasLocalDataForPin(targetPin)) {
         targetDump = await storage.init(targetPin);
       }
 
@@ -729,12 +734,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         storage.addKnownPin(targetPin);
         // Ensure server also has a verified copy
         await savePinWorkspace(targetPin, targetDump, true);
-      } else if (
-        mode === 'migrate' ||
-        (mode === 'auto' && (previousPin === '1000' || previousPin === '1234') && (routinesRef.current.length > 0 || projectsRef.current.length > 0))
-      ) {
-        // User is assigning their custom code for the first time from default 1000/1234:
-        // Migrate current workspace data to this new PIN so their work is NOT lost!
+      } else if (mode === 'migrate') {
+        // User explicitly chose to migrate current workspace data to this new PIN!
         const migratedDump: DatabaseDump = {
           version: 1,
           exportedAt: new Date().toISOString(),
@@ -897,19 +898,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   // Auth
-  const unlockApp = (pin: string): boolean => {
+  const unlockApp = (pin: string, force = false): boolean => {
     const clean = cleanPin(pin);
-    const isPasscodeMatch = !settings.isPinEnabled || pin === settings.pin || clean === cleanPin(settings.pin || '') || pin === '1234';
-    const isKnownWorkspace = clean === syncPinRef.current || storage.hasLocalDataForPin(clean) || storage.getKnownPins().includes(clean);
+    const isPasscodeMatch = force || !settings.isPinEnabled || pin === settings.pin || clean === cleanPin(settings.pin || '') || pin === '1234';
+    const isKnownWorkspace = force || clean === syncPinRef.current || storage.hasLocalDataForPin(clean) || storage.getKnownPins().includes(clean);
 
     if (isPasscodeMatch || isKnownWorkspace) {
       setIsLocked(false);
       // If entered PIN corresponds to a known workspace different from current, switch to that workspace!
-      if (clean !== syncPinRef.current && (storage.hasLocalDataForPin(clean) || storage.getKnownPins().includes(clean))) {
+      if (clean !== syncPinRef.current && (force || storage.hasLocalDataForPin(clean) || storage.getKnownPins().includes(clean))) {
         setSyncPin(clean, 'auto');
       }
       return true;
     }
+    return false;
+  };
+
+  const unlockAppAsync = async (pin: string): Promise<boolean> => {
+    const clean = cleanPin(pin);
+    // 1. Instant local memory check
+    if (unlockApp(clean)) {
+      return true;
+    }
+    // 2. Check cloud server for workspace
+    try {
+      const pinCheck = await checkPinExistsDetailed(clean);
+      if (pinCheck.exists) {
+        storage.addKnownPin(clean);
+        setIsLocked(false);
+        await setSyncPin(clean, 'auto');
+        return true;
+      }
+    } catch {}
     return false;
   };
 
@@ -1787,6 +1807,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       lastSyncedTime,
       isLocked,
       unlockApp,
+      unlockAppAsync,
       lockApp,
       settings,
       updateSettings,

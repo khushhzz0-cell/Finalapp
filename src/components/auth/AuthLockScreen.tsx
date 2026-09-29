@@ -1,6 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
-import { Lock } from 'lucide-react';
+import { Lock, RefreshCw, FolderOpen } from 'lucide-react';
+import { fetchServerPins } from '../../services/pinSyncService';
+import { storage } from '../../db/storage';
+import { triggerHaptic } from '../../utils/haptics';
 
 const KEYPAD_LETTERS: Record<string, string> = {
   '1': '',
@@ -16,35 +19,67 @@ const KEYPAD_LETTERS: Record<string, string> = {
 };
 
 export const AuthLockScreen: React.FC = () => {
-  const { unlockApp, settings } = useApp();
+  const { unlockApp, unlockAppAsync, settings } = useApp();
   const [pinInput, setPinInput] = useState('');
   const [isError, setIsError] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [knownPins, setKnownPins] = useState<string[]>([]);
 
-  const handleKeyPress = (digit: string) => {
-    if (pinInput.length < 4) {
+  useEffect(() => {
+    fetchServerPins()
+      .then((pins) => {
+        const pinCodes = pins.map((p) => p.pin).filter((p) => p && p !== '1000' && p !== '1234');
+        const local = storage.getKnownPins().filter((p) => p && p !== '1000' && p !== '1234');
+        const combined = Array.from(new Set([...pinCodes, ...local]));
+        setKnownPins(combined);
+      })
+      .catch(() => {
+        const local = storage.getKnownPins().filter((p) => p && p !== '1000' && p !== '1234');
+        setKnownPins(local);
+      });
+  }, []);
+
+  const handleKeyPress = async (digit: string) => {
+    if (pinInput.length < 4 && !isVerifying) {
+      triggerHaptic('light');
       const next = pinInput + digit;
       setPinInput(next);
       setIsError(false);
 
       if (next.length === 4) {
-        const success = unlockApp(next);
+        setIsVerifying(true);
+        const success = await unlockAppAsync(next);
+        setIsVerifying(false);
         if (!success) {
+          triggerHaptic('warning');
           setIsError(true);
           setTimeout(() => {
             setPinInput('');
           }, 400);
+        } else {
+          triggerHaptic('success');
         }
       }
     }
   };
 
   const handleDelete = () => {
-    setPinInput(prev => prev.slice(0, -1));
+    triggerHaptic('light');
+    setPinInput((prev) => prev.slice(0, -1));
     setIsError(false);
   };
 
   const handleQuickUnlock = () => {
+    triggerHaptic('selection');
     unlockApp(settings.pin || '1234');
+  };
+
+  const handleSelectWorkspacePin = async (pin: string) => {
+    triggerHaptic('selection');
+    setPinInput(pin);
+    setIsVerifying(true);
+    await unlockAppAsync(pin);
+    setIsVerifying(false);
   };
 
   return (
@@ -59,20 +94,24 @@ export const AuthLockScreen: React.FC = () => {
       />
 
       {/* Top Section */}
-      <div className="w-full max-w-xs flex flex-col items-center mt-2 sm:mt-8 text-center">
+      <div className="w-full max-w-xs flex flex-col items-center mt-2 sm:mt-6 text-center">
         <div className="w-12 h-12 rounded-full bg-[#1c1c1e] flex items-center justify-center mb-3">
-          <Lock className="w-5 h-5 text-white" />
+          {isVerifying ? (
+            <RefreshCw className="w-5 h-5 text-[#0a84ff] animate-spin" />
+          ) : (
+            <Lock className="w-5 h-5 text-white" />
+          )}
         </div>
         <h2 className="text-lg font-semibold text-white tracking-tight">
           Enter Passcode
         </h2>
         <p className="text-xs text-[#8e8e93] mt-0.5">
-          Private personal workspace
+          {isVerifying ? 'Checking cloud workspace...' : 'Private personal workspace'}
         </p>
 
         {/* 4 Apple Passcode Dots */}
-        <div className={`flex items-center gap-5 mt-7 ${isError ? 'animate-bounce' : ''}`}>
-          {[0, 1, 2, 3].map(i => {
+        <div className={`flex items-center gap-5 mt-6 ${isError ? 'animate-bounce' : ''}`}>
+          {[0, 1, 2, 3].map((i) => {
             const isFilled = pinInput.length > i;
             return (
               <div
@@ -92,12 +131,35 @@ export const AuthLockScreen: React.FC = () => {
             Incorrect passcode. Enter your 4-digit workspace PIN or 1234.
           </p>
         )}
+
+        {/* Cloud Workspaces Quick Picker */}
+        {knownPins.length > 0 && !isError && (
+          <div className="mt-4 flex flex-col items-center gap-1.5 w-full">
+            <span className="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold flex items-center gap-1">
+              <FolderOpen className="w-3 h-3 text-[#0a84ff]" />
+              Cloud Workspaces Found
+            </span>
+            <div className="flex flex-wrap items-center justify-center gap-1.5 max-w-[260px]">
+              {knownPins.map((p) => (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => handleSelectWorkspacePin(p)}
+                  className="px-2.5 py-1 rounded-lg bg-white/[0.08] hover:bg-[#0a84ff]/20 hover:border-[#0a84ff]/40 border border-white/10 text-white font-mono text-xs font-semibold transition cursor-pointer active:scale-95 flex items-center gap-1"
+                >
+                  <span className="text-[#0a84ff]">#</span>
+                  <span>{p}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* iOS Circular Keypad */}
-      <div className="w-full max-w-xs space-y-4 mb-8">
+      <div className="w-full max-w-xs space-y-4 mb-6">
         <div className="grid grid-cols-3 gap-5 justify-items-center">
-          {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map(num => (
+          {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((num) => (
             <button
               key={num}
               onClick={() => handleKeyPress(num)}
@@ -146,7 +208,7 @@ export const AuthLockScreen: React.FC = () => {
           </div>
         </div>
 
-        <div className="text-center pt-3">
+        <div className="text-center pt-2">
           <p className="text-[11px] text-[#8e8e93]">
             Passcode: <span className="text-white font-medium">Workspace PIN</span> or <span className="text-white font-medium">1234</span>
           </p>

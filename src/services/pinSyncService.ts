@@ -66,6 +66,24 @@ export interface PinDetailedStatus {
 }
 
 /**
+ * Read PIN from URL query or hash if provided (e.g. ?pin=9999 or #9999)
+ */
+export function getPinFromUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const pinParam = params.get('pin') || params.get('code');
+    if (pinParam) {
+      const clean = pinParam.replace(/\D/g, '').slice(0, 4);
+      if (clean.length === 4) return clean;
+    }
+    const hash = window.location.hash.replace(/\D/g, '').slice(0, 4);
+    if (hash.length === 4) return hash;
+  } catch {}
+  return null;
+}
+
+/**
  * Fetch all existing PIN workspaces known by the server
  */
 export async function fetchServerPins(): Promise<Array<{
@@ -76,8 +94,12 @@ export async function fetchServerPins(): Promise<Array<{
   lastSyncedAt: string | null;
 }>> {
   try {
-    const res = await fetch('/api/sync/pins', { cache: 'no-store' });
-    if (res.ok) {
+    const res = await fetch('/api/sync/pins', {
+      headers: { 'Accept': 'application/json' },
+      cache: 'no-store',
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
       const data = await res.json();
       if (Array.isArray(data.pins)) {
         // Register each into local storage known pins
@@ -107,8 +129,12 @@ export async function checkPinExistsDetailed(pin: string): Promise<PinDetailedSt
   let cloudStats: any = null;
 
   try {
-    const res = await fetch(`/api/sync/${code}/check`, { cache: 'no-store' });
-    if (res.ok) {
+    const res = await fetch(`/api/sync/${code}/check`, {
+      headers: { 'Accept': 'application/json' },
+      cache: 'no-store',
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
       const json = await res.json();
       cloudExists = !!json.exists;
       cloudStats = json.stats;
@@ -170,6 +196,12 @@ export async function loadPinWorkspace(pin: string): Promise<DatabaseDump | null
 
     if (!res.ok) {
       throw new Error(`Server returned ${res.status}`);
+    }
+
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      setSyncStatus('connected');
+      return null;
     }
 
     const payload = await res.json();
